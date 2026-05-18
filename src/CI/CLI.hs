@@ -92,40 +92,39 @@ data ProtectOpts = ProtectOpts
 --     'CI.Node.DagSelection' instead of three positional knobs (and
 --     the @"--no-deps without selectors"@ illegal combination is
 --     unrepresentable at this layer).
---   * @passthroughArgs@: everything after @--@; forwarded verbatim to
---     @process-compose up@.
+--
+-- The @--@-passthrough tail is /not/ a field on 'RunOpts': it lives
+-- outside the optparse-parsed structure entirely, returned alongside
+-- 'Args' by 'parseCli'. See that function's haddock for why.
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
-    dagSelection :: DagSelection,
-    passthroughArgs :: [String]
+    dagSelection :: DagSelection
   }
 
--- | Parse argv and return the structured 'Args'. Bad flags and
--- @--help@ exit the process via optparse-applicative's standard
--- handler — callers see only a successful parse.
+-- | Parse argv and return the structured 'Args' alongside the raw
+-- post-@--@ argv tail. Bad flags and @--help@ exit the process via
+-- optparse-applicative's standard handler — callers see only a
+-- successful parse.
 --
 -- The argv is split around the first @--@ before optparse sees it:
 -- pre-@--@ tokens go through the parser as flags + positional leaf
--- selectors; post-@--@ tokens are stashed verbatim into
--- 'RunOpts.passthroughArgs' (only meaningful on the @run@ subcommand).
--- This is what lets @ci run e2e -- -t=true@ keep working: the @--@
--- separates leaf selectors from process-compose passthrough.
-parseCli :: IO Args
+-- selectors; post-@--@ tokens are returned in the second tuple
+-- element. The tail is only meaningful for @ci run@ (forwarded to
+-- @process-compose up@) and ignored on the inspection subcommands —
+-- the caller in "Main" pattern-matches on the subcommand and routes
+-- accordingly. Returning it explicitly rather than threading it
+-- through 'RunOpts' avoids the two-phase parse-then-rewrite pattern
+-- where the parser would otherwise have to write a known-wrong
+-- placeholder that a downstream pass corrects.
+parseCli :: IO (Args, [String])
 parseCli = do
   raw <- getArgs
   let (pre, post) = case break (== "--") raw of
         (xs, "--" : ys) -> (xs, ys)
         _ -> (raw, [])
   args <- handleParseResult (execParserPure defaultPrefs parserInfo pre :: ParserResult Args)
-  pure (injectPassthrough post args)
-
--- | Stash the post-@--@ argv tail into 'RunOpts.passthroughArgs'. A
--- no-op on non-@Run@ subcommands (they don't carry passthrough).
-injectPassthrough :: [String] -> Args -> Args
-injectPassthrough [] args = args
-injectPassthrough post (Args (Run opts)) = Args (Run (opts {passthroughArgs = post}))
-injectPassthrough _ args = args
+  pure (args, post)
 
 parserInfo :: ParserInfo Args
 parserInfo =
@@ -174,9 +173,6 @@ runOptsParser =
           )
       )
     <*> dagSelectionParser
-    -- 'passthroughArgs' is filled in by 'injectPassthrough' from the
-    -- post-@--@ tail; the parser itself never sees those tokens.
-    <*> pure []
 
 -- | Parse @--root@ + positional selectors + @--no-deps@ into a single
 -- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so

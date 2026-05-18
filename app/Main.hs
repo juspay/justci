@@ -13,13 +13,13 @@ import System.Environment (lookupEnv)
 
 main :: IO ()
 main = do
-  args <- parseCli
+  (args, passthrough) <- parseCli
   case args.cmd of
     Run opts -> do
       dirs <- ensureRunDir
       strict <- (== Just "true") <$> lookupEnv "CI"
       let runner = if strict then runStrict else runLocal
-      runner opts dirs
+      runner opts passthrough dirs
     DumpYaml -> runDumpYaml
     Graph -> runGraph
     Protect opts -> runProtect opts

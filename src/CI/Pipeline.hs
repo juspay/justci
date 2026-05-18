@@ -104,15 +104,15 @@ ensureRunDir = do
 -- the dirty live tree — the dev's uncommitted work is intentionally
 -- invisible to remote lanes; the bundle reflects committed history
 -- only.
-runLocal :: RunOpts -> RunDir -> IO ()
-runLocal opts dirs = do
+runLocal :: RunOpts -> [String] -> RunDir -> IO ()
+runLocal opts passthrough dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   pc <- buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
     void $
-      runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui opts.passthroughArgs) pc
+      runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
   exitWithVerdict (hostFor hosts) outcomes
 
 -- | Strict mode: clean-tree refuse → resolve repo + SHA → snapshot HEAD
@@ -141,8 +141,8 @@ runLocal opts dirs = do
 -- outcome (a failed node leaves pc exiting 0). The accumulated
 -- outcome map is the source of truth; 'exitWithVerdict' derives the
 -- final 'ExitCode' from it.
-runStrict :: RunOpts -> RunDir -> IO ()
-runStrict opts dirs = do
+runStrict :: RunOpts -> [String] -> RunDir -> IO ()
+runStrict opts passthrough dirs = do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
@@ -160,7 +160,7 @@ runStrict opts dirs = do
             >> recordOutcome outcomes node ps
     withObserver dirs.sock onState $
       void $
-        runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui opts.passthroughArgs) pc
+        runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
     exitWithVerdict (hostFor hosts) outcomes
 
 -- | Print the assembled pipeline's dependency graph to stdout in
