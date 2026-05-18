@@ -22,9 +22,10 @@ where
 
 import CI.Hosts (Host, hostFromText)
 import CI.Justfile (RecipeName, recipeNameFromText)
-import CI.Node (NodeSelector, parseSelector)
+import CI.Node (DagSelection (..), DepsMode (..), NodeSelector, SelectorMode (..), parseSelector)
 import CI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
 import Control.Applicative (many, optional, (<|>))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import Data.Text (Text)
 import Options.Applicative
@@ -85,21 +86,18 @@ data ProtectOpts = ProtectOpts
 --   * @tui@: drive process-compose's TUI instead of its headless logger.
 --   * @hostOverrides@: overlay onto @~\/.config\/ci\/hosts.json@ via
 --     'CI.Hosts.mergeHostOverrides'; CLI entries win on collision.
---   * @rootOverride@: use the named recipe as the DAG root instead of
---     whichever recipe carries @[metadata("ci")]@. Empty by default.
---   * @leaves@: restrict the DAG to these (recipe, optionally platform)
---     selectors and their transitive dependencies. Empty list = run
---     the full DAG.
---   * @noDeps@: with @leaves@ set, skip the transitive expansion and
---     run only the named selectors themselves.
+--   * @dagSelection@: the DAG-shape choice — @--root@ override plus the
+--     positional leaf selectors and @--no-deps@ flag, bundled into one
+--     value so 'CI.Pipeline.buildProcessCompose' takes a single
+--     'CI.Node.DagSelection' instead of three positional knobs (and
+--     the @"--no-deps without selectors"@ illegal combination is
+--     unrepresentable at this layer).
 --   * @passthroughArgs@: everything after @--@; forwarded verbatim to
 --     @process-compose up@.
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
-    rootOverride :: Maybe RecipeName,
-    leaves :: [NodeSelector],
-    noDeps :: Bool,
+    dagSelection :: DagSelection,
     passthroughArgs :: [String]
   }
 
@@ -175,7 +173,21 @@ runOptsParser =
               <> help "Override the ~/.config/ci/hosts.json mapping for this run. Repeatable; e.g. --host x86_64-linux=root@lxc-foo. CLI overrides win over the file; platforms not named here still consult the file."
           )
       )
-    <*> optional
+    <*> dagSelectionParser
+    -- 'passthroughArgs' is filled in by 'injectPassthrough' from the
+    -- post-@--@ tail; the parser itself never sees those tokens.
+    <*> pure []
+
+-- | Parse @--root@ + positional selectors + @--no-deps@ into a single
+-- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so
+-- the @--no-deps@ flag silently has no effect without selectors —
+-- matching @just@'s behaviour for the same flag, and making the
+-- @"--no-deps without selectors"@ state unrepresentable in
+-- 'SelectorMode' rather than relying on docstring discipline.
+dagSelectionParser :: Parser DagSelection
+dagSelectionParser =
+  DagSelection
+    <$> optional
       ( option
           recipeNameReader
           ( long "root"
@@ -183,7 +195,12 @@ runOptsParser =
               <> help "Use RECIPE as the DAG root instead of whichever recipe carries [metadata(\"ci\")]. The pipeline fans out across its OS attributes as usual."
           )
       )
-    <*> many
+    <*> selectorModeParser
+
+selectorModeParser :: Parser SelectorMode
+selectorModeParser =
+  combine
+    <$> many
       ( argument
           selectorReader
           ( metavar "RECIPE[@PLATFORM]..."
@@ -192,11 +209,12 @@ runOptsParser =
       )
     <*> switch
       ( long "no-deps"
-          <> help "With positional RECIPE[@PLATFORM] selectors, run only the named nodes — do not transitively expand their dependencies. Mirrors `just --no-deps`."
+          <> help "With positional RECIPE[@PLATFORM] selectors, run only the named nodes — do not transitively expand their dependencies. Mirrors `just --no-deps`. Silently ignored when no selectors are given."
       )
-    -- 'passthroughArgs' is filled in by 'injectPassthrough' from the
-    -- post-@--@ tail; the parser itself never sees those tokens.
-    <*> pure []
+  where
+    combine [] _ = AllNodes
+    combine (x : xs) skipDeps =
+      SelectedLeaves (x NE.:| xs) (if skipDeps then NoDeps else WithDeps)
 
 -- | Parse a single positional @RECIPE[\@PLATFORM]@ selector. Delegates
 -- to 'parseSelector' in "CI.Node" — the same parsing rule the

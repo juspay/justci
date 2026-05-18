@@ -1,5 +1,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The runner DAG's node identity, as a closed sum over the two kinds
@@ -32,6 +34,12 @@ module CI.Node
     NodeSelector (..),
     parseSelector,
 
+    -- * DAG selection
+    DagSelection (..),
+    defaultDagSelection,
+    SelectorMode (..),
+    DepsMode (..),
+
     -- * Graph rendering
     toMermaid,
   )
@@ -42,6 +50,7 @@ import CI.Justfile (RecipeName, recipeNameFromText)
 import CI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
 import Data.Aeson (ToJSON (..), ToJSONKey (..))
 import Data.Aeson.Types (toJSONKeyText)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Display (Display (..), display)
@@ -160,6 +169,45 @@ parseSelector t
         Nothing ->
           Left $
             "selector " <> T.unpack t <> " has @ but no known platform suffix (expected one of: " <> T.unpack supportedPlatformsLabel <> ")"
+
+-- | Whether dependencies of a selector seed are kept in the run.
+-- Mirrors @just@'s @--no-deps@ flag, but only meaningful in the
+-- presence of selectors — 'AllNodes' doesn't carry one.
+data DepsMode = WithDeps | NoDeps
+  deriving stock (Show, Eq)
+
+-- | What subset of the fanned-out DAG to run. Three disjoint cases,
+-- expressed as a sum so the illegal @"no selectors, but --no-deps"@
+-- combination ('SelectedLeaves' with @[]@ + 'NoDeps') is structurally
+-- absent. 'AllNodes' is the default (no positional selectors given);
+-- 'SelectedLeaves' carries a non-empty list because the parser only
+-- emits this branch when at least one selector was supplied.
+data SelectorMode
+  = AllNodes
+  | SelectedLeaves (NonEmpty NodeSelector) DepsMode
+  deriving stock (Show, Eq)
+
+-- | The user-supplied "what to run" spec for a single @ci run@
+-- invocation. Groups the two orthogonal axes — DAG root override and
+-- selector mode — that together decide which fanned-out nodes the
+-- pipeline targets. One value travels through 'CI.Pipeline'
+-- (@buildProcessCompose@, the inspection subcommands' canonical-mode
+-- callers) instead of three positional arguments.
+--
+-- 'defaultDagSelection' is the constant used by every inspection
+-- caller ('runGraph', 'runDumpYaml', 'runProtect') — the canonical
+-- @[metadata("ci")]@-root DAG with no leaf trimming.
+data DagSelection = DagSelection
+  { rootOverride :: Maybe RecipeName,
+    selectorMode :: SelectorMode
+  }
+  deriving stock (Show, Eq)
+
+-- | The canonical "run everything from the metadata root" selection.
+-- Used by inspection commands and by callers that haven't been given
+-- per-run options.
+defaultDagSelection :: DagSelection
+defaultDagSelection = DagSelection {rootOverride = Nothing, selectorMode = AllNodes}
 
 -- | Render an adjacency map of 'NodeId's as Mermaid @flowchart TD@.
 -- Vertex IDs are sanitized to mermaid-safe alphanumeric+underscore;

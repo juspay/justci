@@ -36,7 +36,7 @@ import CI.Hosts (Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverride
 import CI.Justfile (Attribute (..), Recipe (..), RecipeName, fetchDump, recipeCommand)
 import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
-import CI.Node (NodeId (..), NodeSelector (..), nodePlatform, parseNodeId, toMermaid)
+import CI.Node (DagSelection (..), DepsMode (..), NodeId (..), NodeSelector (..), SelectorMode (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
 import CI.Platform (Platform, localPlatform, platformOs)
 import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
 import CI.ProcessCompose.Events (ProcessState (..), subscribeStates)
@@ -48,6 +48,7 @@ import Control.Monad (void)
 import qualified Data.ByteString as BS
 import Data.Foldable (for_)
 import Data.List (nub)
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
@@ -105,7 +106,7 @@ ensureRunDir = do
 runLocal :: RunOpts -> RunDir -> IO ()
 runLocal opts dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  pc <- buildProcessCompose hosts opts.rootOverride opts.leaves opts.noDeps LocalRun
+  pc <- buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
@@ -147,7 +148,7 @@ runStrict opts dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    pc <- buildProcessCompose hosts opts.rootOverride opts.leaves opts.noDeps $ StrictRun dirs.worktreePath logDir
+    pc <- buildProcessCompose hosts opts.dagSelection $ StrictRun dirs.worktreePath logDir
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     seedPending repo sha logDir nodes
@@ -179,7 +180,7 @@ runStrict opts dirs = do
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts Nothing [] False DumpRun
+  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -189,7 +190,7 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts Nothing [] False DumpRun
+  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
   BS.putStr (Y.encode pc)
 
 -- | Branch-protection helper: read the canonical DAG, extract the
@@ -215,7 +216,7 @@ runDumpYaml = do
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts Nothing [] False DumpRun
+  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
   let contexts = contextForNode <$> filter isUserVisible (processNames pc)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
@@ -345,19 +346,15 @@ yamlPathsFor DumpRun = (const Nothing, const Nothing)
 --    SSH command shapes.
 buildProcessCompose ::
   Hosts ->
-  -- | DAG root override. 'Nothing' = discover via the
-  --   @[metadata("ci")]@ attribute on a recipe.
-  Maybe RecipeName ->
-  -- | Positional selectors restricting the DAG. Empty = full DAG.
-  [NodeSelector] ->
-  -- | With selectors set, run only the named nodes (skip their
-  --   transitive dependencies). Ignored when selectors is empty.
-  Bool ->
+  -- | What subset of the DAG to build. The canonical full DAG is
+  --   'defaultDagSelection'; @ci run@'s @--root@/positional/
+  --   @--no-deps@ knobs populate the other constructors.
+  DagSelection ->
   RunMode ->
   IO ProcessCompose
-buildProcessCompose hosts rootOverride leaves noDeps mode = do
+buildProcessCompose hosts sel mode = do
   recipes <- dieOnLeft =<< fetchDump
-  rootName <- case rootOverride of
+  rootName <- case sel.rootOverride of
     Just r
       | Map.member r recipes -> pure r
       | otherwise ->
@@ -384,7 +381,7 @@ buildProcessCompose hosts rootOverride leaves noDeps mode = do
           <> unwords (show <$> rootOsFamilies rootRecipe)
     _ -> pure ()
   let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
-  nodeGraph <- dieOnLeft $ applySelectors leaves noDeps pipelinePlatforms unfilteredNodeGraph
+  nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
   -- Same predicate 'fanOut' uses to decide where to emit setup
   -- nodes — sourcing both from one definition avoids the dormant
   -- divergence risk of two near-identical "is this platform
@@ -496,34 +493,32 @@ instance Display SelectionError where
       <> displayBuilder s
       <> " did not match any node in the pipeline DAG (check the root, OS attributes, and hosts.json)"
 
--- | Restrict the fanned-out graph to the user's positional selectors
--- (or return the full graph if no selectors were given).
+-- | Restrict the fanned-out graph to the user's selector mode.
 --
---   * Empty selectors → identity. The pipeline runs the full DAG.
---   * Each 'SelRecipe' expands to every @(recipe, platform)@ pair in
---     the pipeline's platform set; 'SelRecipePlatform' pins to one.
---   * @noDeps = False@ (the default): keep each seed plus everything
+--   * 'AllNodes' → identity. The pipeline runs the full DAG.
+--   * 'SelectedLeaves' with 'WithDeps': keep each seed plus everything
 --     reachable from it along the runner DAG's @depends_on@ edges. On
 --     remote platforms this auto-includes the 'SetupNode' because
 --     every recipe node depends on it.
---   * @noDeps = True@: keep only the seeds. The setup-node auto-include
---     still applies — running a remote recipe without its setup would
---     emit a dangling @depends_on@ in the YAML.
+--   * 'SelectedLeaves' with 'NoDeps': keep only the seeds. The
+--     setup-node auto-include still applies — running a remote recipe
+--     without its setup would emit a dangling @depends_on@ in the YAML.
+--
+-- @SelRecipe@ seeds expand to every @(recipe, platform)@ pair in the
+-- pipeline's platform set; @SelRecipePlatform@ seeds pin to one.
 applySelectors ::
-  [NodeSelector] ->
-  Bool ->
+  SelectorMode ->
   [Platform] ->
   G.AdjacencyMap NodeId ->
   Either SelectionError (G.AdjacencyMap NodeId)
-applySelectors [] _ _ g = Right g
-applySelectors selectors noDeps platforms g = do
-  seeds <- nub . concat <$> traverse (resolveSelector allNodes platforms) selectors
-  let baseKeep =
-        if noDeps
-          then Set.fromList seeds
-          else Set.fromList (concatMap (G.reachable g) seeds)
+applySelectors AllNodes _ g = Right g
+applySelectors (SelectedLeaves selectors depsMode) platforms g = do
+  seeds <- nub . concat <$> traverse (resolveSelector allNodes platforms) (NE.toList selectors)
+  let baseKeep = case depsMode of
+        NoDeps -> Set.fromList seeds
+        WithDeps -> Set.fromList (concatMap (G.reachable g) seeds)
       -- Auto-include the SetupNode for any selected remote-platform
-      -- recipe even under @--no-deps@, so the emitted YAML never
+      -- recipe even under 'NoDeps', so the emitted YAML never
       -- references a setup node we dropped.
       requiredSetup =
         Set.fromList
