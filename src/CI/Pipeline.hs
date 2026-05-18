@@ -21,6 +21,7 @@ module CI.Pipeline
 
     -- * Pipeline assembly
     RunMode (..),
+    BuildGraphError,
     buildNodeGraph,
     buildProcessCompose,
   )
@@ -107,7 +108,7 @@ ensureRunDir = do
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  pc <- buildProcessCompose hosts opts.dagSelection LocalRun
+  pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
@@ -149,7 +150,7 @@ runStrict opts passthrough dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    pc <- buildProcessCompose hosts opts.dagSelection $ StrictRun dirs.worktreePath logDir
+    pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     seedPending repo sha logDir nodes
@@ -181,7 +182,7 @@ runStrict opts passthrough dirs = do
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
+  pc <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -191,7 +192,7 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
+  pc <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   BS.putStr (Y.encode pc)
 
 -- | Branch-protection helper: read the canonical DAG, extract the
@@ -217,7 +218,7 @@ runDumpYaml = do
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
-  (nodeGraph, _) <- buildNodeGraph hosts defaultDagSelection
+  (nodeGraph, _) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
   let contexts = contextForNode <$> filter isUserVisible (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
@@ -319,6 +320,37 @@ yamlPathsFor (StrictRun wt ld) = (workingDirFor wt, Just . logPathFor ld)
 yamlPathsFor LocalRun = (const Nothing, const Nothing)
 yamlPathsFor DumpRun = (const Nothing, const Nothing)
 
+-- | A user-recoverable failure during graph construction. Surfaced
+-- through @Either@ rather than 'die' so callers ('runLocal',
+-- 'runStrict', 'runGraph', 'runDumpYaml', 'runProtect') own the
+-- die-vs-respond boundary at one place. Other failures inside
+-- 'buildNodeGraph' (justfile parse, recipe ordering cycles, reachability
+-- on a missing recipe, local-system classification) already flow
+-- through their own 'Either' types and are funneled here via
+-- 'dieOnLeft' at the same boundary.
+data BuildGraphError
+  = -- | @--root \<r\>@ named a recipe that isn't in the justfile.
+    --     Carries the bad name so the display rendering can echo it
+    --     back to the user.
+    BadRoot RecipeName
+  | -- | The root recipe declares OS attrs (e.g. @[linux] [macos]@),
+    --     but none of those families have a matching system configured
+    --     — neither @localPlatform@ nor any host in @hosts.json@.
+    --     Carries the root name + the unsatisfied OS families so the
+    --     display rendering names both.
+    EmptyFanout RecipeName [J.Os]
+  deriving stock (Show)
+
+instance Display BuildGraphError where
+  displayBuilder (BadRoot r) =
+    "--root " <> displayBuilder r <> " is not a recipe in the justfile"
+  displayBuilder (EmptyFanout rootName oss) =
+    "root recipe declares OS attrs but no matching system is configured. "
+      <> "Either remove the OS attrs from "
+      <> displayBuilder rootName
+      <> " or add an entry to ~/.config/ci/hosts.json for one of: "
+      <> displayBuilder (T.pack (unwords (show <$> oss)))
+
 -- | Walk @just --dump@ → root → reachable subgraph → topologically
 -- lowered DAG → fan out across the pipeline's platform set → filter
 -- by the user's 'DagSelection'. The graph-construction half of the
@@ -346,38 +378,31 @@ yamlPathsFor DumpRun = (const Nothing, const Nothing)
 -- Returns the filtered fanned-out graph plus the local platform —
 -- the latter is needed downstream for transport selection
 -- ('commandForNode') and is computed here anyway as part of fanout.
-buildNodeGraph :: Hosts -> DagSelection -> IO (G.AdjacencyMap NodeId, Platform)
+buildNodeGraph :: Hosts -> DagSelection -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform))
 buildNodeGraph hosts sel = do
   recipes <- dieOnLeft =<< fetchDump
-  rootName <- case sel.rootOverride of
+  rootResult <- case sel.rootOverride of
     Just r
-      | Map.member r recipes -> pure r
-      | otherwise ->
-          die $
-            "--root "
-              <> T.unpack (display r)
-              <> " is not a recipe in the justfile"
-    Nothing -> dieOnLeft $ findRoot recipes
-  rootRecipe <- case Map.lookup rootName recipes of
-    Just r -> pure r
-    -- findRoot / the membership check above guarantee this; the lookup is defensive.
-    Nothing -> die $ "internal error: root " <> T.unpack (display rootName) <> " missing from recipe map"
-  reachable <- dieOnLeft $ reachableSubgraph rootName recipes
-  recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
-  localPlat <- dieOnLeft localPlatform
-  let pipelinePlatforms = pipelinePlatformsFor rootRecipe localPlat hosts
-  case pipelinePlatforms of
-    [] ->
-      die $
-        "root recipe declares OS attrs but no matching system is configured. "
-          <> "Either remove the OS attrs from "
-          <> T.unpack (display rootName)
-          <> " or add an entry to ~/.config/ci/hosts.json for one of: "
-          <> unwords (show <$> rootOsFamilies rootRecipe)
-    _ -> pure ()
-  let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
-  nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
-  pure (nodeGraph, localPlat)
+      | Map.member r recipes -> pure (Right r)
+      | otherwise -> pure (Left (BadRoot r))
+    Nothing -> Right <$> dieOnLeft (findRoot recipes)
+  case rootResult of
+    Left err -> pure (Left err)
+    Right rootName -> do
+      rootRecipe <- case Map.lookup rootName recipes of
+        Just r -> pure r
+        -- The root-resolution above guarantees membership; defensive only.
+        Nothing -> die $ "internal error: root " <> T.unpack (display rootName) <> " missing from recipe map"
+      reachable <- dieOnLeft $ reachableSubgraph rootName recipes
+      recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
+      localPlat <- dieOnLeft localPlatform
+      let pipelinePlatforms = pipelinePlatformsFor rootRecipe localPlat hosts
+      case pipelinePlatforms of
+        [] -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe)))
+        _ -> do
+          let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
+          nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
+          pure (Right (nodeGraph, localPlat))
 
 -- | Build the full 'ProcessCompose' YAML: extends 'buildNodeGraph'
 -- with SHA resolution, transport command rendering, and the
@@ -390,30 +415,33 @@ buildNodeGraph hosts sel = do
 -- depending on whether its platform matches the runner's; the
 -- 'CI.Transport' builders are the only site that know SSH command
 -- shapes.
-buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO ProcessCompose
+buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO (Either BuildGraphError ProcessCompose)
 buildProcessCompose hosts sel mode = do
-  (nodeGraph, localPlat) <- buildNodeGraph hosts sel
-  -- Same predicate 'fanOut' uses to decide where to emit setup
-  -- nodes — sourcing both from one definition avoids the dormant
-  -- divergence risk of two near-identical "is this platform
-  -- remote?" predicates. Computed over the *filtered* node set so
-  -- a partial run that excluded every remote lane doesn't ask for
-  -- a SHA it doesn't need.
-  let nodePlatforms = nub (nodePlatform <$> G.vertexList nodeGraph)
-      hasRemote = any (\p -> isRemote p (localPlat, hosts)) nodePlatforms
-  -- A Sha is needed iff at least one remote lane is fanned out
-  -- (setup nodes ship a bundle that gets @git checkout@'d on the
-  -- remote at this SHA). @DumpRun@ uses 'shaPlaceholder' so
-  -- inspection works outside a git checkout; non-remote local runs
-  -- also use the placeholder (never consumed — the graph has no
-  -- nodes that read it).
-  sha <- case mode of
-    DumpRun -> pure shaPlaceholder
-    _ | hasRemote -> dieOnLeft =<< resolveSha
-    _ -> pure shaPlaceholder
-  let mkCommand = commandForNode sha localPlat hosts
-      (yamlWorkingDir, yamlLogLocation) = yamlPathsFor mode
-  pure $ toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph
+  result <- buildNodeGraph hosts sel
+  case result of
+    Left err -> pure (Left err)
+    Right (nodeGraph, localPlat) -> do
+      -- Same predicate 'fanOut' uses to decide where to emit setup
+      -- nodes — sourcing both from one definition avoids the dormant
+      -- divergence risk of two near-identical "is this platform
+      -- remote?" predicates. Computed over the *filtered* node set so
+      -- a partial run that excluded every remote lane doesn't ask for
+      -- a SHA it doesn't need.
+      let nodePlatforms = nub (nodePlatform <$> G.vertexList nodeGraph)
+          hasRemote = any (\p -> isRemote p (localPlat, hosts)) nodePlatforms
+      -- A Sha is needed iff at least one remote lane is fanned out
+      -- (setup nodes ship a bundle that gets @git checkout@'d on the
+      -- remote at this SHA). @DumpRun@ uses 'shaPlaceholder' so
+      -- inspection works outside a git checkout; non-remote local runs
+      -- also use the placeholder (never consumed — the graph has no
+      -- nodes that read it).
+      sha <- case mode of
+        DumpRun -> pure shaPlaceholder
+        _ | hasRemote -> dieOnLeft =<< resolveSha
+        _ -> pure shaPlaceholder
+      let mkCommand = commandForNode sha localPlat hosts
+          (yamlWorkingDir, yamlLogLocation) = yamlPathsFor mode
+      pure (Right (toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph))
 
 -- | The pipeline's platform set: the intersection of (the root
 -- recipe's declared OS families) with (the systems we have either a
