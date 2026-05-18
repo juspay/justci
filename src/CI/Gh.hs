@@ -14,6 +14,7 @@ module CI.Gh
     Owner,
     RepoName,
     Repo,
+    BranchName,
     CommitStatus (..),
     Context,
     CommitStatusPost (..),
@@ -34,6 +35,7 @@ import CI.Git (Sha)
 import CI.Subprocess (SubprocessError, runSubprocess)
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy.Char8 as BL
+import Data.String (IsString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Display (Display (..), display)
@@ -62,6 +64,15 @@ newtype RepoName = RepoName Text
 -- alongside the 'CI.Git.Sha'.
 data Repo = Repo {owner :: Owner, name :: RepoName}
   deriving stock (Show, Eq)
+
+-- | A GitHub branch name (e.g. @main@, @master@, @develop@). Opaque
+-- per @prefer-newtype-over-string@: minted either by 'viewDefaultBranch'
+-- (resolved from @gh repo view@) or via 'OverloadedStrings' literals
+-- ('IsString'). 'Display' is the canonical destructor — consumers
+-- never pattern-match the constructor.
+newtype BranchName = BranchName Text
+  deriving stock (Show, Eq)
+  deriving newtype (Display, IsString)
 
 -- | Failures from the gh operations in this module.
 data GhError
@@ -96,7 +107,7 @@ viewRepo = do
 -- | Resolve the repo's default branch name (e.g. @main@, @master@) via
 -- @gh repo view --json defaultBranchRef@. Used by "CI.Pipeline.runProtect"
 -- when the user hasn't passed an explicit @--branch@.
-viewDefaultBranch :: IO (Either GhError Text)
+viewDefaultBranch :: IO (Either GhError BranchName)
 viewDefaultBranch = do
   result <-
     runSubprocess
@@ -110,7 +121,7 @@ viewDefaultBranch = do
       let b = T.strip (T.pack out)
        in if T.null b
             then Left (UnexpectedDefaultBranch out)
-            else Right b
+            else Right (BranchName b)
 
 -- | The four GitHub-defined commit-status states. See
 -- <https://docs.github.com/en/rest/commits/statuses>. The 'Display'
@@ -188,7 +199,7 @@ apiPost endpoint fields = do
 -- creator. If protection isn't enabled gh returns a 404 which surfaces
 -- through 'SubprocessError'; the user enables protection once via the
 -- GH UI, then re-runs @ci protect@.
-setRequiredChecks :: Repo -> Text -> [Context] -> IO (Either SubprocessError ())
+setRequiredChecks :: Repo -> BranchName -> [Context] -> IO (Either SubprocessError ())
 setRequiredChecks repo branch contexts = apiPatchJson endpoint body
   where
     endpoint =
@@ -197,7 +208,7 @@ setRequiredChecks repo branch contexts = apiPatchJson endpoint body
         <> "/"
         <> display repo.name
         <> "/branches/"
-        <> branch
+        <> display branch
         <> "/protection/required_status_checks"
     body =
       A.object

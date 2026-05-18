@@ -20,6 +20,7 @@ module CI.CLI
   )
 where
 
+import CI.Gh (BranchName)
 import CI.Hosts (Host, hostFromText)
 import CI.Justfile (RecipeName, recipeNameFromText)
 import CI.Node (DagSelection (..), DepsMode (..), NodeSelector, SelectorMode (..), parseSelector)
@@ -27,7 +28,6 @@ import CI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
 import Control.Applicative (many, optional, (<|>))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
-import Data.Text (Text)
 import Options.Applicative
   ( Parser,
     ParserInfo,
@@ -77,7 +77,7 @@ data Command
 --   * @dryRun@: print the contexts that /would/ be PATCHed and exit
 --     without touching the GitHub API.
 data ProtectOpts = ProtectOpts
-  { branchOverride :: Maybe Text,
+  { branchOverride :: Maybe BranchName,
     dryRun :: Bool
   }
 

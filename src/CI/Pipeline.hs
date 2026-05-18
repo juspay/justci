@@ -233,7 +233,7 @@ runProtect opts = do
         Just b -> pure b
         Nothing -> dieOnLeft =<< viewDefaultBranch
       dieOnLeft =<< setRequiredChecks repo branch contexts
-      TIO.putStrLn $ "updated required_status_checks on " <> branch <> " (" <> nCtx <> " contexts)"
+      TIO.putStrLn $ "updated required_status_checks on " <> display branch <> " (" <> nCtx <> " contexts)"
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
