@@ -21,6 +21,7 @@ module CI.Pipeline
 
     -- * Pipeline assembly
     RunMode (..),
+    buildNodeGraph,
     buildProcessCompose,
   )
 where
@@ -216,8 +217,8 @@ runDumpYaml = do
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts defaultDagSelection DumpRun
-  let contexts = contextForNode <$> filter isUserVisible (processNames pc)
+  (nodeGraph, _) <- buildNodeGraph hosts defaultDagSelection
+  let contexts = contextForNode <$> filter isUserVisible (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
@@ -326,10 +327,10 @@ yamlPathsFor LocalRun = (const Nothing, const Nothing)
 yamlPathsFor DumpRun = (const Nothing, const Nothing)
 
 -- | Walk @just --dump@ → root → reachable subgraph → topologically
--- lowered DAG → fan out across the pipeline's platform set →
--- 'ProcessCompose' YAML. Platform discovery, host resolution, and
--- transport selection all happen here so the YAML emitter
--- ("CI.ProcessCompose") stays a dumb encoder.
+-- lowered DAG → fan out across the pipeline's platform set → filter
+-- by the user's 'DagSelection'. The graph-construction half of the
+-- pipeline; 'buildProcessCompose' adds the transport + YAML render
+-- pass on top.
 --
 --  * Pipeline platforms come from the root recipe's OS attributes
 --    (@[linux] [macos] [metadata(\"ci\")] root:@). A root with no
@@ -340,19 +341,20 @@ yamlPathsFor DumpRun = (const Nothing, const Nothing)
 --    entry from the fanout, so a missing host is never a runtime
 --    failure — the user opts in by editing the file.
 --
---  * Each fanned-out 'NodeId' gets a 'Local' or @Ssh host@ transport
---    depending on whether its platform matches the runner's; the
---    'CI.Transport.commandFor' rendering is the only site that knows
---    SSH command shapes.
-buildProcessCompose ::
-  Hosts ->
-  -- | What subset of the DAG to build. The canonical full DAG is
-  --   'defaultDagSelection'; @ci run@'s @--root@/positional/
-  --   @--no-deps@ knobs populate the other constructors.
-  DagSelection ->
-  RunMode ->
-  IO ProcessCompose
-buildProcessCompose hosts sel mode = do
+-- Exposed separately from 'buildProcessCompose' because 'runProtect'
+-- and any future graph-only consumer (e.g. a "what would this run?"
+-- query) genuinely only need the node set — they don't want to pay
+-- the cost of SHA resolution + YAML assembly that
+-- 'buildProcessCompose' adds on top. The two phases sit on different
+-- volatility axes anyway: DAG shape changes with the recipe graph
+-- and the fanout policy; YAML field names / dep-edge syntax change
+-- with process-compose's schema.
+--
+-- Returns the filtered fanned-out graph plus the local platform —
+-- the latter is needed downstream for transport selection
+-- ('commandForNode') and is computed here anyway as part of fanout.
+buildNodeGraph :: Hosts -> DagSelection -> IO (G.AdjacencyMap NodeId, Platform)
+buildNodeGraph hosts sel = do
   recipes <- dieOnLeft =<< fetchDump
   rootName <- case sel.rootOverride of
     Just r
@@ -382,6 +384,22 @@ buildProcessCompose hosts sel mode = do
     _ -> pure ()
   let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
   nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
+  pure (nodeGraph, localPlat)
+
+-- | Build the full 'ProcessCompose' YAML: extends 'buildNodeGraph'
+-- with SHA resolution, transport command rendering, and the
+-- per-mode YAML projections ('yamlPathsFor'). Used by every
+-- subcommand that actually drives process-compose ('runLocal',
+-- 'runStrict') or emits its YAML/graph form ('runDumpYaml',
+-- 'runGraph').
+--
+-- Each fanned-out 'NodeId' gets a local or @ssh host@ command
+-- depending on whether its platform matches the runner's; the
+-- 'CI.Transport' builders are the only site that know SSH command
+-- shapes.
+buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO ProcessCompose
+buildProcessCompose hosts sel mode = do
+  (nodeGraph, localPlat) <- buildNodeGraph hosts sel
   -- Same predicate 'fanOut' uses to decide where to emit setup
   -- nodes — sourcing both from one definition avoids the dormant
   -- divergence risk of two near-identical "is this platform
