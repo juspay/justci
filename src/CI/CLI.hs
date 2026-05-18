@@ -13,6 +13,7 @@ module CI.CLI
     Args (..),
     Command (..),
     RunOpts (..),
+    ProtectOpts (..),
 
     -- * Entry point
     parseCli,
@@ -25,6 +26,7 @@ import CI.Node (NodeSelector, parseSelector)
 import CI.Platform (Platform, parsePlatform)
 import Control.Applicative (many, optional, (<|>))
 import qualified Data.Text as T
+import Data.Text (Text)
 import Options.Applicative
   ( Parser,
     ParserInfo,
@@ -43,6 +45,7 @@ import Options.Applicative
     metavar,
     option,
     progDesc,
+    strOption,
     subparser,
     switch,
     (<**>),
@@ -55,13 +58,27 @@ import System.Environment (getArgs)
 -- there are no global flags at this layer.
 newtype Args = Args {cmd :: Command}
 
--- | The parsed subcommand. 'Run' carries its own option record;
--- 'DumpYaml' and 'Graph' are pure inspection modes with no options
--- (the graph is always emitted as Mermaid @flowchart TD@ syntax).
+-- | The parsed subcommand. 'Run' and 'Protect' carry their own option
+-- records; 'DumpYaml' and 'Graph' are pure inspection modes with no
+-- options (the graph is always emitted as Mermaid @flowchart TD@
+-- syntax).
 data Command
   = Run RunOpts
   | DumpYaml
   | Graph
+  | Protect ProtectOpts
+
+-- | Options that only apply to @ci protect@.
+--
+--   * @branchOverride@: which branch's protection ruleset to update.
+--     'Nothing' = resolve the repo's default branch via
+--     @gh repo view --json defaultBranchRef@.
+--   * @dryRun@: print the contexts that /would/ be PATCHed and exit
+--     without touching the GitHub API.
+data ProtectOpts = ProtectOpts
+  { branchOverride :: Maybe Text,
+    dryRun :: Bool
+  }
 
 -- | Options that only apply to @ci run@.
 --
@@ -127,8 +144,24 @@ commandParser =
     ( O.command "run" (info (Run <$> runOptsParser) (progDesc "Execute the CI pipeline via process-compose (default). Args after -- are passed through."))
         <> O.command "dump-yaml" (info (pure DumpYaml) (progDesc "Print the process-compose YAML to stdout"))
         <> O.command "graph" (info (pure Graph) (progDesc "Print the process dependency graph in Mermaid flowchart syntax"))
+        <> O.command "protect" (info (Protect <$> protectOptsParser) (progDesc "Set GitHub branch-protection required_status_checks to the (recipe, platform) contexts the canonical DAG produces."))
     )
     <|> (Run <$> runOptsParser)
+
+protectOptsParser :: Parser ProtectOpts
+protectOptsParser =
+  ProtectOpts
+    <$> optional
+      ( strOption
+          ( long "branch"
+              <> metavar "BRANCH"
+              <> help "Which branch to update protection for. Defaults to the repo's default branch (queried via `gh repo view`)."
+          )
+      )
+    <*> switch
+      ( long "dry-run"
+          <> help "Print the contexts that would be PATCHed and exit, without touching the GitHub API."
+      )
 
 runOptsParser :: Parser RunOpts
 runOptsParser =

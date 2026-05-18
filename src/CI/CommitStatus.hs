@@ -32,6 +32,9 @@ module CI.CommitStatus
     postStatusFor,
     seedPending,
 
+    -- * Naming convention
+    contextForNode,
+
     -- * === Internal (test surface) ===
     terminalToCommitStatus,
     -- ^ Exposed only for "test.CI.VerdictSpec"'s cross-module

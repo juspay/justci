@@ -17,6 +17,7 @@ module CI.Pipeline
     runStrict,
     runGraph,
     runDumpYaml,
+    runProtect,
 
     -- * Pipeline assembly
     RunMode (..),
@@ -26,9 +27,9 @@ where
 
 import qualified Algebra.Graph.AdjacencyMap as G
 import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
-import CI.CLI (RunOpts (..))
-import CI.CommitStatus (postStatusFor, seedPending)
-import CI.Gh (viewRepo)
+import CI.CLI (ProtectOpts (..), RunOpts (..))
+import CI.CommitStatus (contextForNode, postStatusFor, seedPending)
+import CI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
 import CI.Hosts (Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverrides)
@@ -189,6 +190,57 @@ runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
   pc <- buildProcessCompose hosts Nothing [] False DumpRun
   BS.putStr (Y.encode pc)
+
+-- | Branch-protection helper: read the canonical DAG, extract the
+-- @(recipe, platform)@ context for every user-facing node, and PATCH
+-- the GitHub branch protection's required-status-checks list to
+-- exactly that set. The user-facing filter is the same one
+-- 'CI.CommitStatus.postStatusFor' applies — setup nodes never post
+-- statuses, so they never show up as required checks either.
+--
+-- The DAG comes from the canonical @[metadata("ci")]@ root: there's
+-- no @--root@ on @protect@ because the required-check list is the
+-- source of truth for "what statuses must exist on every PR", not a
+-- partial / leaf re-run knob (per the discussion in #20).
+--
+-- 'opts.branchOverride' selects which branch to protect; absent, we
+-- look up the repo's default branch via @gh repo view@.
+-- 'opts.dryRun' prints the contexts and exits without touching the
+-- API, for inspection before flipping the live ruleset.
+--
+-- @gh@ returns 404 if branch protection isn't enabled on the
+-- target branch — that's a one-time toggle the repo owner does in
+-- the GitHub UI before @ci protect@ is meaningful.
+runProtect :: ProtectOpts -> IO ()
+runProtect opts = do
+  hosts <- dieOnLeft =<< loadHosts
+  pc <- buildProcessCompose hosts Nothing [] False DumpRun
+  let contexts =
+        [ contextForNode n
+        | n@(RecipeNode _ _) <- processNames pc
+        ]
+  case contexts of
+    [] -> die "no recipe nodes in the DAG — nothing to require"
+    _ -> pure ()
+  if opts.dryRun
+    then do
+      TIO.putStrLn $
+        "would PATCH required_status_checks ("
+          <> T.pack (show (length contexts))
+          <> " contexts):"
+      for_ contexts $ \c -> TIO.putStrLn $ "  " <> display c
+    else do
+      repo <- dieOnLeft =<< viewRepo
+      branch <- case opts.branchOverride of
+        Just b -> pure b
+        Nothing -> dieOnLeft =<< viewDefaultBranch
+      dieOnLeft =<< setRequiredChecks repo branch contexts
+      TIO.putStrLn $
+        "updated required_status_checks on "
+          <> branch
+          <> " ("
+          <> T.pack (show (length contexts))
+          <> " contexts)"
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
