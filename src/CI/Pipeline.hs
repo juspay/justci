@@ -27,7 +27,7 @@ import CI.CommitStatus (postStatusFor, seedPending)
 import CI.Gh (viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
-import CI.Hosts (Hosts, hostsPlatforms, loadHosts, lookupHost)
+import CI.Hosts (Host, Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverrides)
 import CI.Justfile (Attribute (..), Recipe (..), RecipeName, fetchDump, recipeCommand)
 import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
@@ -96,9 +96,9 @@ ensureRunDir = do
 -- the dirty live tree — the dev's uncommitted work is intentionally
 -- invisible to remote lanes; the bundle reflects committed history
 -- only.
-runLocal :: RunDir -> Bool -> [String] -> IO ()
-runLocal dirs tui passthrough = do
-  hosts <- dieOnLeft =<< loadHosts
+runLocal :: [(Platform, Host)] -> RunDir -> Bool -> [String] -> IO ()
+runLocal overrides dirs tui passthrough = do
+  hosts <- mergeHostOverrides overrides <$> (dieOnLeft =<< loadHosts)
   pc <- buildProcessCompose hosts LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
@@ -133,12 +133,12 @@ runLocal dirs tui passthrough = do
 -- outcome (a failed node leaves pc exiting 0). The accumulated
 -- outcome map is the source of truth; 'exitWithVerdict' derives the
 -- final 'ExitCode' from it.
-runStrict :: RunDir -> Bool -> [String] -> IO ()
-runStrict dirs tui passthrough = do
+runStrict :: [(Platform, Host)] -> RunDir -> Bool -> [String] -> IO ()
+runStrict overrides dirs tui passthrough = do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
-  hosts <- dieOnLeft =<< loadHosts
+  hosts <- mergeHostOverrides overrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
     pc <- buildProcessCompose hosts $ StrictRun dirs.worktreePath logDir

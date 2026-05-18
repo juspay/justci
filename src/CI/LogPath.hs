@@ -11,7 +11,16 @@
 -- to avoid collisions, a flat layout, S3 URLs) edits this file and
 -- nothing else; the YAML emitter and the commit-status poster both
 -- consume from here and stay byte-identical by construction.
-module CI.LogPath (shortShaLen, logDirFor, platformDir, logPathFor) where
+module CI.LogPath
+  ( -- * Shared constants
+    shortShaLen,
+
+    -- * Path composition
+    logDirFor,
+    platformDir,
+    logPathFor,
+  )
+where
 
 import CI.Git (Sha)
 import CI.Node (NodeId, nodeName, nodePlatform)

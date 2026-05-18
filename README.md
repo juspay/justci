@@ -49,6 +49,8 @@ The pipeline's fanout = (root recipe's OS families × configured systems matchin
 
 **Local platform override.** An entry for the *local* system takes precedence over inline execution: configure `"x86_64-linux": "pu connect srid1"` from an x86_64-linux host and the linux lane routes through `pu` instead of running in the worktree. The path for exercising remote runners (or testing failure modes) without leaving the local box.
 
+**One-shot CLI overrides.** A repeatable `--host PLATFORM=ADDR` option on `ci run` overlays onto whatever `hosts.json` contains, with CLI entries winning on collision: `ci run --host x86_64-linux=root@lxc-foo` redirects the linux lane to a throwaway LXC container for that invocation without touching the JSON file. Platforms not named on the CLI still consult `hosts.json` as usual.
+
 The remote host needs `nix`, `git`, and any tools the recipes themselves use available on its PATH. **`just` does not need to be pre-installed** — the runner ships the target-platform `just` *derivation* (a small file of build metadata) via `nix-store --export | ssh <host> nix-store --import`, then the remote `nix-store --realise`s it. The remote's substituter chain (typically `cache.nixos.org`) fetches the natively-built binary for its own arch, so the linux runner never tries to execute a darwin binary and vice versa.
 
 Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@host`, an alias from `~/.ssh/config`. Incus instances are reached via an ssh-config alias that names them; no special-case client at the runner layer.
@@ -59,7 +61,7 @@ Every emitted process is `restart: no` and `exit_on_skipped: false`, so one fail
 
 ## Subcommands
 
-- `ci run [--tui] [-- <args>]` (default): drive the pipeline; anything after `--` is forwarded verbatim to `process-compose up`. `--tui` swaps process-compose's headless logger for its interactive tcell view — useful for poking at long-running pipelines locally.
+- `ci run [--tui] [--host PLATFORM=ADDR ...] [-- <args>]` (default): drive the pipeline; anything after `--` is forwarded verbatim to `process-compose up`. `--tui` swaps process-compose's headless logger for its interactive tcell view — useful for poking at long-running pipelines locally. `--host PLATFORM=ADDR` is repeatable and overlays onto `~/.config/ci/hosts.json` (see _Remote builds over SSH_ above).
 - `ci dump-yaml`: emit the assembled YAML to stdout for inspection. Runs in a side-effect-free mode — no host prompts, no `git rev-parse` shell-out — so it works offline, on a remote VM with no TTY, and outside a git checkout. Unresolved hosts render as `<unconfigured>` and the SSH `checkout` carries a `0000000-dump-yaml-placeholder` token; the YAML's *structure* (process keys, depends_on edges) still reflects the real fanout.
 
 ## Roadmap

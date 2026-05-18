@@ -15,10 +15,15 @@
 -- schema, which changes independently of the YAML config schema (which
 -- lives in "CI.ProcessCompose") and the invocation argv.
 module CI.ProcessCompose.Events
-  ( ProcessState (..),
+  ( -- * Wire vocabulary
+    ProcessState (..),
     ProcessStatus (..),
+
+    -- * Terminal classification
     TerminalStatus (..),
     psToTerminalStatus,
+
+    -- * Subscription
     subscribeStates,
   )
 where

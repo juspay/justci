@@ -23,17 +23,14 @@ module CI.Hosts
     Hosts,
     HostsLoadError,
 
+    -- * Construction
+    hostFromText,
+    mergeHostOverrides,
+
     -- * Loading + lookup
     loadHosts,
     lookupHost,
     hostsPlatforms,
-
-    -- * === Internal (test surface) ===
-    hostFromText,
-    -- ^ Smart constructor for 'Host', exposed for tests in
-    -- "test.CI.TransportSpec" that need to build a host value
-    -- without going through the JSON loader. Production code mints
-    -- 'Host's exclusively via 'loadHosts'.
   )
 where
 
@@ -59,9 +56,23 @@ newtype Host = Host Text
 
 -- | Smart constructor — named so every minting site is searchable. No
 -- validation today; the @ssh@ subprocess is the source of truth on
--- whether the string is a valid destination.
+-- whether the string is a valid destination. Two production minting
+-- sites: 'loadHosts' (JSON decode) and "CI.CLI" (the @--host PLATFORM=ADDR@
+-- override flag).
 hostFromText :: Text -> Host
 hostFromText = Host
+
+-- | Overlay caller-supplied @(Platform, Host)@ overrides onto a 'Hosts'
+-- map. Used by the CLI's @--host@ flag for one-shot redirects to a
+-- throwaway target (e.g. an LXC container) without editing
+-- @~\/.config\/ci\/hosts.json@. CLI overrides win over the loaded map
+-- on collision; platforms not named by either source still route
+-- inline when they match 'CI.Platform.localPlatform', and get
+-- filtered out of the fanout by 'CI.Pipeline.pipelinePlatformsFor'
+-- otherwise.
+mergeHostOverrides :: [(Platform, Host)] -> Hosts -> Hosts
+mergeHostOverrides overrides (Hosts m) =
+  Hosts (Map.union (Map.fromList overrides) m)
 
 -- | A loaded view of @~\/.config\/ci\/hosts.json@. Newtype around the
 -- underlying map so 'lookupHost' and 'hostsPlatforms' are the only

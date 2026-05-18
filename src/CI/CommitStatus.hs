@@ -27,7 +27,18 @@
 --
 -- The endpoint URL, the wire encoding of each state, and the
 -- form-field names are gh-API details owned by "CI.Gh".
-module CI.CommitStatus (postStatusFor, seedPending, terminalToCommitStatus) where
+module CI.CommitStatus
+  ( -- * Posting
+    postStatusFor,
+    seedPending,
+
+    -- * === Internal (test surface) ===
+    terminalToCommitStatus,
+    -- ^ Exposed only for "test.CI.VerdictSpec"'s cross-module
+    -- agreement check against 'CI.Verdict.terminalToOutcome' —
+    -- production code reaches this mapping through 'postStatusFor'.
+  )
+where
 
 import CI.Gh (CommitStatus (..), CommitStatusPost (..), Context, Repo, contextFrom, postCommitStatus)
 import CI.Git (Sha)
