@@ -63,7 +63,8 @@ test-suite ci-test
     import:           warnings
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
-    other-modules:    CI.JustfileSpec
+    other-modules:    CI.CommitStatusSpec
+                      CI.JustfileSpec
                       CI.NodeSpec
                       CI.PlatformSpec
                       CI.ProcessComposeSpec

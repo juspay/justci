@@ -32,6 +32,10 @@ module CI.CommitStatus
     postStatusFor,
     seedPending,
 
+    -- * Per-node timing
+    Timings,
+    newTimings,
+
     -- * Naming convention
     contextForNode,
 
@@ -40,6 +44,9 @@ module CI.CommitStatus
     -- ^ Exposed only for "test.CI.VerdictSpec"'s cross-module
     -- agreement check against 'CI.Verdict.terminalToOutcome' —
     -- production code reaches this mapping through 'postStatusFor'.
+    formatElapsed,
+    -- ^ Exposed for "test.CI.CommitStatusSpec" so the human-readable
+    -- duration formatter's branches stay locked.
   )
 where
 
@@ -49,10 +56,13 @@ import CI.LogPath (logPathFor)
 import CI.Node (NodeId (..))
 import CI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..), TerminalStatus (..), psToTerminalStatus)
 import Control.Concurrent.Async (forConcurrently_)
-import Data.Foldable (for_)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Display (display)
+import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import System.IO (hPutStrLn, stderr)
 
 -- | Given a process-compose state event for an already-parsed
@@ -83,12 +93,19 @@ import System.IO (hPutStrLn, stderr)
 -- Posting failures are logged to stderr with a @gh:@ prefix and
 -- swallowed — the node's exit code must not depend on whether a
 -- status post succeeded.
-postStatusFor :: Repo -> Sha -> FilePath -> NodeId -> ProcessState -> IO ()
-postStatusFor repo sha logDir node ps
-  | isUserVisible node =
-      for_ (psToCommitStatus ps) $ \cs ->
-        postOne repo sha node cs $ describe cs $ logPathFor logDir node
-  | otherwise = pure ()
+postStatusFor :: Timings -> Repo -> Sha -> FilePath -> NodeId -> ProcessState -> IO ()
+postStatusFor timings repo sha logDir node ps
+  | not (isUserVisible node) = pure ()
+  | otherwise = case ps.status of
+      PsRunning -> do
+        markStart timings node
+        postOne repo sha node Pending (describe Pending Nothing (logPathFor logDir node))
+      _ -> case psToTerminalStatus ps of
+        Nothing -> pure ()
+        Just ts -> do
+          mElapsed <- elapsedSince timings node
+          let cs = terminalToCommitStatus ts
+          postOne repo sha node cs (describe cs mElapsed (logPathFor logDir node))
 
 -- | Pre-seed every node with a 'Pending' commit status at startup —
 -- one parallel @gh api@ POST per node, all joined before this returns.
@@ -139,18 +156,25 @@ postOne repo sha node cs desc = do
 contextForNode :: NodeId -> Context
 contextForNode = contextFrom . display
 
--- | CI's human-readable label per state, suffixed with the recipe's log
+-- | CI's human-readable label per state, optionally annotated with the
+-- elapsed time the node spent running, suffixed with the recipe's log
 -- path so the GitHub UI's 140-char description carries a one-click
--- pointer to the matching file under @.ci\/\<sha\>\/@. Path stays under
--- ~80 chars at typical recipe-name lengths, leaving room for the state
--- prose without truncation.
-describe :: CommitStatus -> FilePath -> Text
-describe cs = withLogPath $ stateLabel cs
+-- pointer to the matching file under @.ci\/\<sha\>\/@. Path stays
+-- under ~80 chars at typical recipe-name lengths, leaving room for
+-- the state prose without truncation.
+--
+-- Elapsed time is only present on terminal posts (Success/Failure/Error);
+-- the @PsRunning@ → @Pending@ transition fires at start, so its elapsed
+-- would be zero — pointless to display. Pending posts get @Nothing@.
+describe :: CommitStatus -> Maybe NominalDiffTime -> FilePath -> Text
+describe cs mElapsed = withLogPath (stateLabel cs <> elapsedSuffix mElapsed)
   where
     stateLabel Pending = "Running"
     stateLabel Success = "Succeeded"
     stateLabel Failure = "Failed"
     stateLabel Error = "Errored"
+    elapsedSuffix Nothing = ""
+    elapsedSuffix (Just dt) = " (" <> formatElapsed dt <> ")"
 
 -- | Description for a 'seedPending' post, formatted the same way as
 -- 'describe' so the seed and transition lifecycles share one path-bearing
@@ -165,19 +189,64 @@ seedDescription = withLogPath "Queued"
 withLogPath :: Text -> FilePath -> Text
 withLogPath label logPath = label <> ": " <> T.pack logPath
 
--- | Translate one process-compose 'ProcessState' event into the
--- 'CommitStatus' it surfaces under. Non-terminal states ('PsOther')
--- return 'Nothing' so consumers can drop them. The terminal cases
--- delegate to 'psToTerminalStatus' (the project-wide ground-truth
--- predicate) and add the GitHub-specific @PsRunning -> Pending@
--- transition on top — the verdict accumulator in "CI.Verdict" reuses
--- the same base classifier directly, so the GH check page and the
--- local exit code stay in agreement without "CI.Verdict" having to
--- depend on this module.
-psToCommitStatus :: ProcessState -> Maybe CommitStatus
-psToCommitStatus ps = case ps.status of
-  PsRunning -> Just Pending
-  _ -> terminalToCommitStatus <$> psToTerminalStatus ps
+-- | Compact human-readable rendering of a 'NominalDiffTime': @\<n\>s@
+-- under a minute, @\<n\>m\<n\>s@ under an hour, @\<n\>h\<n\>m@ otherwise.
+-- Sub-second durations round down to @0s@. The format is fixed-width-ish
+-- (≤ 6 chars typical) so the @(\<elapsed\>)@ annotation in 'describe' fits
+-- comfortably inside GitHub's 140-char description budget alongside the
+-- state label and log path.
+formatElapsed :: NominalDiffTime -> Text
+formatElapsed dt =
+  let totalSec = max 0 (floor dt :: Int)
+      h = totalSec `div` 3600
+      m = (totalSec `mod` 3600) `div` 60
+      s = totalSec `mod` 60
+   in if h > 0
+        then T.pack (show h) <> "h" <> T.pack (show m) <> "m"
+        else
+          if m > 0
+            then T.pack (show m) <> "m" <> T.pack (show s) <> "s"
+            else T.pack (show s) <> "s"
+
+-- | Per-node start-time store. Populated by 'postStatusFor' when a
+-- node first transitions to @PsRunning@; read on the terminal
+-- transition to compute elapsed duration. One instance per pipeline
+-- run, allocated by the caller via 'newTimings' (typically in
+-- 'CI.Pipeline.runStrict' alongside the outcome accumulator).
+--
+-- Single-threaded by construction — the WebSocket observer loop
+-- ('CI.ProcessCompose.Events.subscribeStates') invokes 'postStatusFor'
+-- synchronously per event — so atomicModifyIORef' is overkill but
+-- cheap; the alternative would force a TVar+STM rig for an access
+-- pattern that's already serial.
+newtype Timings = Timings (IORef (Map NodeId UTCTime))
+
+-- | Allocate a fresh, empty 'Timings'.
+newTimings :: IO Timings
+newTimings = Timings <$> newIORef Map.empty
+
+-- | Stamp the current wall-clock time as the start of @node@. Called
+-- once per node (on its first @PsRunning@ event); a duplicate
+-- @PsRunning@ would overwrite the prior stamp, but process-compose
+-- only emits @PsRunning@ once per node lifecycle.
+markStart :: Timings -> NodeId -> IO ()
+markStart (Timings ref) node = do
+  now <- getCurrentTime
+  atomicModifyIORef' ref $ \m -> (Map.insert node now m, ())
+
+-- | Wall-clock time elapsed since 'markStart' for this node, or
+-- 'Nothing' if no start was recorded. A missing entry usually means
+-- the node went straight from @ready@ to a terminal state without
+-- emitting a @PsRunning@ event (cache-hit / no-op recipes); the
+-- caller falls back to omitting the duration from the description.
+elapsedSince :: Timings -> NodeId -> IO (Maybe NominalDiffTime)
+elapsedSince (Timings ref) node = do
+  m <- readIORef ref
+  case Map.lookup node m of
+    Nothing -> pure Nothing
+    Just start -> do
+      now <- getCurrentTime
+      pure (Just (diffUTCTime now start))
 
 -- | GitHub-side mapping for the two terminal classifications. The
 -- wire-layer 'PsSkipped' / 'PsErrored' have already been folded into

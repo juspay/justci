@@ -28,7 +28,7 @@ where
 import qualified Algebra.Graph.AdjacencyMap as G
 import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
 import CI.CLI (ProtectOpts (..), RunOpts (..))
-import CI.CommitStatus (contextForNode, postStatusFor, seedPending)
+import CI.CommitStatus (contextForNode, newTimings, postStatusFor, seedPending)
 import CI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
@@ -152,8 +152,9 @@ runStrict opts dirs = do
     createPlatformDirs logDir nodes
     seedPending repo sha logDir nodes
     outcomes <- newOutcomes nodes
+    timings <- newTimings
     let onState ps = withParsedNode ps $ \node ->
-          postStatusFor repo sha logDir node ps
+          postStatusFor timings repo sha logDir node ps
             >> recordOutcome outcomes node ps
     withObserver dirs.sock onState $
       void $
