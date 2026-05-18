@@ -43,7 +43,7 @@ import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
 import CI.Hosts (Hosts, hostsPlatforms, lookupHost)
 import CI.Justfile (Attribute (..), Recipe (..), RecipeName)
 import qualified CI.Justfile as J
-import CI.Node (NodeId (..), NodeSelector (..), SelectorMode (..), DepsMode (..))
+import CI.Node (DepsMode (..), NodeId (..), NodeSelector (..), SelectorMode (..))
 import CI.Platform (Platform, platformOs)
 import Data.List (nub)
 import qualified Data.List.NonEmpty as NE

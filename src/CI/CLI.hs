@@ -1,6 +1,6 @@
-{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 -- | argv parser for the @ci@ executable. Three subcommands —
 -- @run [OPTIONS] [-- ARGS...]@ (default), @dump-yaml@, @graph@ — map

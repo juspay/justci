@@ -95,6 +95,7 @@ remoteRunner host = "ssh -T " <> display host
 -- @(short-sha, platform)@. Resolved at the *remote* shell:
 --
 -- @
+
 -- ${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/\<short-sha\>/\<platform\>
 -- @
 --
@@ -118,6 +119,7 @@ remoteRunner host = "ssh -T " <> display host
 -- bundle+clone entirely. Garbage collection is the user's job —
 -- @rm -rf ~\/.local\/state\/ci@ (or whatever override resolves to)
 -- when disk pressure warrants.
+
 cachedRunDir :: Sha -> Platform -> Text
 cachedRunDir sha targetPlat =
   "${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/"
