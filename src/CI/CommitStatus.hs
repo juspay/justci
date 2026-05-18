@@ -197,17 +197,16 @@ withLogPath label logPath = label <> ": " <> T.pack logPath
 -- comfortably inside GitHub's 140-char description budget alongside the
 -- state label and log path.
 formatElapsed :: NominalDiffTime -> Text
-formatElapsed dt =
-  let totalSec = max 0 (floor dt :: Int)
-      h = totalSec `div` 3600
-      m = (totalSec `mod` 3600) `div` 60
-      s = totalSec `mod` 60
-   in if h > 0
-        then T.pack (show h) <> "h" <> T.pack (show m) <> "m"
-        else
-          if m > 0
-            then T.pack (show m) <> "m" <> T.pack (show s) <> "s"
-            else T.pack (show s) <> "s"
+formatElapsed dt
+  | h > 0 = ts h <> "h" <> ts m <> "m"
+  | m > 0 = ts m <> "m" <> ts s <> "s"
+  | otherwise = ts s <> "s"
+  where
+    totalSec = max 0 (floor dt :: Int)
+    h = totalSec `div` 3600
+    m = (totalSec `mod` 3600) `div` 60
+    s = totalSec `mod` 60
+    ts = T.pack . show
 
 -- | Per-node start-time store. Populated by 'postStatusFor' when a
 -- node first transitions to @PsRunning@; read on the terminal
