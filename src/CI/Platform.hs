@@ -18,6 +18,7 @@ module CI.Platform
   ( -- * Platform values
     Platform (..),
     allPlatforms,
+    supportedPlatformsLabel,
 
     -- * Wire round-trip
     parsePlatform,
@@ -34,7 +35,7 @@ where
 import qualified CI.Justfile as J
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Display (Display (..))
+import Data.Text.Display (Display (..), display)
 import qualified System.Info
 
 -- | The fanout platform set. Closed sum so adding a new system
@@ -60,6 +61,17 @@ instance Display Platform where
 -- | Every 'Platform'.
 allPlatforms :: [Platform]
 allPlatforms = [minBound .. maxBound]
+
+-- | The supported platforms as a comma-separated label
+-- (e.g. @"x86_64-linux, aarch64-linux, aarch64-darwin"@). The single
+-- source of truth for the platform-enum prose that appears in user-facing
+-- error messages — anywhere a "supported: …" / "expected one of: …"
+-- list of platforms would otherwise be hardcoded reaches for this so
+-- the prose tracks 'allPlatforms' mechanically (adding or dropping a
+-- 'Platform' constructor doesn't fan out to error-message string
+-- literals scattered across the codebase).
+supportedPlatformsLabel :: Text
+supportedPlatformsLabel = T.intercalate ", " (display <$> allPlatforms)
 
 -- | Inverse of 'display' over the closed set. 'Nothing' on anything
 -- else — callers (host-config loader, 'CI.Node.parseNodeId') tolerate
@@ -102,7 +114,9 @@ instance Display LocalPlatformError where
   displayBuilder e =
     "unsupported local Nix system: "
       <> displayBuilder (T.pack e.tuple)
-      <> " (supported: x86_64-linux, aarch64-linux, aarch64-darwin)"
+      <> " (supported: "
+      <> displayBuilder supportedPlatformsLabel
+      <> ")"
 
 -- | Classify the running host into a 'Platform'. Reads
 -- 'System.Info.os' + 'System.Info.arch' — both compile-time

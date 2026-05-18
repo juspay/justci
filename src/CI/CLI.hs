@@ -23,7 +23,7 @@ where
 import CI.Hosts (Host, hostFromText)
 import CI.Justfile (RecipeName, recipeNameFromText)
 import CI.Node (NodeSelector, parseSelector)
-import CI.Platform (Platform, parsePlatform)
+import CI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
 import Control.Applicative (many, optional, (<|>))
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -225,5 +225,5 @@ hostOverrideReader = eitherReader $ \s -> case break (== '=') s of
         Just p -> Right (p, hostFromText (T.pack addr))
         Nothing ->
           Left $
-            "unknown platform " <> platStr <> " in --host (expected one of: x86_64-linux, aarch64-linux, aarch64-darwin)"
+            "unknown platform " <> platStr <> " in --host (expected one of: " <> T.unpack supportedPlatformsLabel <> ")"
   _ -> Left $ "expected PLATFORM=ADDR in --host, got: " <> s

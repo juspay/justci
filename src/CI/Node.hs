@@ -39,7 +39,7 @@ where
 
 import qualified Algebra.Graph.AdjacencyMap as G
 import CI.Justfile (RecipeName, recipeNameFromText)
-import CI.Platform (Platform, parsePlatform)
+import CI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
 import Data.Aeson (ToJSON (..), ToJSONKey (..))
 import Data.Aeson.Types (toJSONKeyText)
 import Data.Text (Text)
@@ -159,7 +159,7 @@ parseSelector t
                 else Right (SelRecipePlatform (recipeNameFromText nameText) p)
         Nothing ->
           Left $
-            "selector " <> T.unpack t <> " has @ but no known platform suffix (expected x86_64-linux, aarch64-linux, or aarch64-darwin)"
+            "selector " <> T.unpack t <> " has @ but no known platform suffix (expected one of: " <> T.unpack supportedPlatformsLabel <> ")"
 
 -- | Render an adjacency map of 'NodeId's as Mermaid @flowchart TD@.
 -- Vertex IDs are sanitized to mermaid-safe alphanumeric+underscore;
