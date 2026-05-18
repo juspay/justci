@@ -11,6 +11,7 @@ library
     import:           warnings
     exposed-modules:  CI.CLI
                       CI.CommitStatus
+                      CI.Fanout
                       CI.Gh
                       CI.Git
                       CI.Graph

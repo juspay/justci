@@ -3,10 +3,14 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Orchestration for the two run modes (local / strict), the runtime
--- artifact layout under @\$PWD\/.ci\/@, and the just-graph-to-YAML build.
--- "Main" is the dispatch layer; everything mode-specific or orchestration-
--- shaped lives here.
+-- | Orchestration for the per-subcommand entry points
+-- ('runLocal', 'runStrict', 'runGraph', 'runDumpYaml', 'runProtect')
+-- and the runtime artifact layout under @\$PWD\/.ci\/@. "Main" is the
+-- dispatch layer; everything mode-specific lives here. The pure graph
+-- shape change (recipe DAG → platform-fanned NodeId DAG, plus the
+-- user-selector filter) lives in "CI.Fanout"; this module composes
+-- 'CI.Fanout' with @just --dump@ → root resolution → process-compose
+-- YAML rendering.
 module CI.Pipeline
   ( -- * Runtime artifact layout
     RunDir (..),
@@ -28,18 +32,18 @@ module CI.Pipeline
 where
 
 import qualified Algebra.Graph.AdjacencyMap as G
-import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
 import CI.CLI (ProtectOpts (..), RunOpts (..))
 import CI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
+import CI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import CI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
-import CI.Hosts (Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverrides)
-import CI.Justfile (Attribute (..), Recipe (..), RecipeName, fetchDump, recipeCommand)
+import CI.Hosts (Hosts, loadHosts, lookupHost, mergeHostOverrides)
+import CI.Justfile (RecipeName, fetchDump, recipeCommand)
 import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
-import CI.Node (DagSelection (..), DepsMode (..), NodeId (..), NodeSelector (..), SelectorMode (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
-import CI.Platform (Platform, localPlatform, platformOs)
+import CI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
+import CI.Platform (Platform, localPlatform)
 import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
 import CI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import CI.Root (findRoot)
@@ -50,10 +54,7 @@ import Control.Monad (void)
 import qualified Data.ByteString as BS
 import Data.Foldable (for_)
 import Data.List (nub)
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
-import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
@@ -442,155 +443,6 @@ buildProcessCompose hosts sel mode = do
       let mkCommand = commandForNode sha localPlat hosts
           (yamlWorkingDir, yamlLogLocation) = yamlPathsFor mode
       pure (Right (toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph))
-
--- | The pipeline's platform set: the intersection of (the root
--- recipe's declared OS families) with (the systems we have either a
--- hosts.json entry for OR are running on locally).
---
---   * Root @[linux] [macos]@ + local @x86_64-linux@ + hosts.json
---     @{aarch64-darwin: ...}@ → @{x86_64-linux, aarch64-darwin}@.
---   * Root @[linux]@ + local @x86_64-linux@ + empty hosts.json →
---     @{x86_64-linux}@ (local-only, no macos).
---   * Root with no OS attrs → @{localPlat}@ (single-host shape,
---     same as before fanout existed).
---
--- A system in @hosts.json@ whose OS family doesn't appear in the root
--- attributes is silently ignored — the user opts in by adding the OS
--- attribute to the root. Symmetrically, an OS family in the root that
--- matches no configured system is silently empty for that family —
--- the user opts in by adding an entry to @hosts.json@.
-pipelinePlatformsFor :: Recipe -> Platform -> Hosts -> [Platform]
-pipelinePlatformsFor root localPlat hosts =
-  let configured = nub (localPlat : hostsPlatforms hosts)
-   in case rootOsFamilies root of
-        [] -> [localPlat]
-        oss -> filter (\p -> platformOs p `elem` oss) configured
-
--- | The OS-family attributes declared on a recipe ('[linux]',
--- '[macos]', etc.), as a plain list. Used both by
--- 'pipelinePlatformsFor' (to compute the fanout set) and by the
--- empty-fanout error in 'buildProcessCompose' (to tell the user
--- which families couldn't be satisfied).
-rootOsFamilies :: Recipe -> [J.Os]
-rootOsFamilies r = [o | Os o <- r.attributes]
-
--- | Cross-product the recipe DAG with the pipeline's platform set:
--- one 'NodeId' per @(recipe, platform)@, edges replicated
--- lane-by-lane with no cross-platform connections. Each remote
--- platform also gets a synthetic @_ci-setup\@\<platform\>@ node;
--- every recipe node on that platform @depends_on@ it. The setup
--- node ships the @just@ derivation + a fresh @git bundle@ once per
--- remote per run; recipe nodes reuse the cached checkout.
---
--- Platforms that route inline ('localPlat' with no hosts entry)
--- don't need a setup node — there's no bundle to ship, no remote
--- clone to coordinate.
---
--- Lanes run independently; a failure on linux doesn't block macos
--- and vice versa (and the cross-lane failure tolerance
--- @restart: no@ / @exit_on_skipped: false@ in 'CI.ProcessCompose'
--- carries that through).
-fanOut :: Platform -> Hosts -> [Platform] -> G.AdjacencyMap RecipeName -> G.AdjacencyMap NodeId
-fanOut localPlat hosts platforms g =
-  recipeVertices
-    `G.overlay` G.edges recipeEdges
-    `G.overlay` G.vertices setupVertices
-    `G.overlay` G.edges setupEdges
-  where
-    recipeVertices = G.vertices [RecipeNode r p | r <- G.vertexList g, p <- platforms]
-    recipeEdges = [(RecipeNode r p, RecipeNode d p) | (r, d) <- G.edgeList g, p <- platforms]
-    -- Remote platforms: anything with a hosts entry runs over SSH.
-    -- A local platform with a hosts entry counts as remote (the
-    -- host-override case).
-    remotePlatforms = filter (`isRemote` (localPlat, hosts)) platforms
-    setupVertices = [SetupNode p | p <- remotePlatforms]
-    -- Every recipe node on a remote platform depends on that
-    -- platform's setup node.
-    setupEdges =
-      [ (RecipeNode r p, SetupNode p)
-      | r <- G.vertexList g,
-        p <- remotePlatforms
-      ]
-
--- | A platform routes through SSH if it has a hosts.json entry, or
--- if it isn't the local platform (the latter shouldn't happen post-
--- 'pipelinePlatformsFor' filtering, but the check is cheap and
--- explicit).
-isRemote :: Platform -> (Platform, Hosts) -> Bool
-isRemote p (localPlat, hosts) =
-  isJust (lookupHost p hosts) || p /= localPlat
-
--- | A user-supplied 'NodeSelector' that doesn't resolve to any node
--- in the fanned-out graph. Carries the selector verbatim so the
--- error message echoes the exact token from argv.
-newtype SelectionError = SelectorNotInPipeline NodeSelector
-  deriving stock (Show)
-
-instance Display SelectionError where
-  displayBuilder (SelectorNotInPipeline s) =
-    "selector "
-      <> displayBuilder s
-      <> " did not match any node in the pipeline DAG (check the root, OS attributes, and hosts.json)"
-
--- | Restrict the fanned-out graph to the user's selector mode.
---
---   * 'AllNodes' → identity. The pipeline runs the full DAG.
---   * 'SelectedLeaves' with 'WithDeps': keep each seed plus everything
---     reachable from it along the runner DAG's @depends_on@ edges. On
---     remote platforms this auto-includes the 'SetupNode' because
---     every recipe node depends on it.
---   * 'SelectedLeaves' with 'NoDeps': keep only the seeds. The
---     setup-node auto-include still applies — running a remote recipe
---     without its setup would emit a dangling @depends_on@ in the YAML.
---
--- @SelRecipe@ seeds expand to every @(recipe, platform)@ pair in the
--- pipeline's platform set; @SelRecipePlatform@ seeds pin to one.
-applySelectors ::
-  SelectorMode ->
-  [Platform] ->
-  G.AdjacencyMap NodeId ->
-  Either SelectionError (G.AdjacencyMap NodeId)
-applySelectors AllNodes _ g = Right g
-applySelectors (SelectedLeaves selectors depsMode) platforms g = do
-  seeds <- nub . concat <$> traverse (resolveSelector allNodes platforms) (NE.toList selectors)
-  let baseKeep = case depsMode of
-        NoDeps -> Set.fromList seeds
-        WithDeps -> Set.fromList (concatMap (G.reachable g) seeds)
-      -- Auto-include the SetupNode for any selected remote-platform
-      -- recipe even under 'NoDeps', so the emitted YAML never
-      -- references a setup node we dropped.
-      requiredSetup =
-        Set.fromList
-          [ SetupNode p
-          | RecipeNode _ p <- Set.toList baseKeep,
-            SetupNode p `Set.member` allNodes
-          ]
-      keep = baseKeep `Set.union` requiredSetup
-  pure (G.induce (`Set.member` keep) g)
-  where
-    allNodes = G.vertexSet g
-
--- | Map one 'NodeSelector' onto the matching 'NodeId's in the
--- fanned-out graph, failing with 'SelectorNotInPipeline' if the
--- selector resolves to nothing. A bare 'SelRecipe' fans out across
--- every pipeline platform present in the graph; a
--- 'SelRecipePlatform' pins to the exact pair.
-resolveSelector ::
-  Set.Set NodeId ->
-  [Platform] ->
-  NodeSelector ->
-  Either SelectionError [NodeId]
-resolveSelector allNodes platforms = \case
-  SelRecipe r ->
-    let candidates = [RecipeNode r p | p <- platforms]
-        present = filter (`Set.member` allNodes) candidates
-     in if null present
-          then Left (SelectorNotInPipeline (SelRecipe r))
-          else Right present
-  s@(SelRecipePlatform r p) ->
-    if RecipeNode r p `Set.member` allNodes
-      then Right [RecipeNode r p]
-      else Left (SelectorNotInPipeline s)
 
 -- | Per-node command construction. Dispatches over (host lookup,
 -- node kind) and picks one of the three valid command builders in
