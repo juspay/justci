@@ -428,8 +428,7 @@ buildProcessCompose hosts sel mode = do
       -- remote?" predicates. Computed over the *filtered* node set so
       -- a partial run that excluded every remote lane doesn't ask for
       -- a SHA it doesn't need.
-      let nodePlatforms = nub (nodePlatform <$> G.vertexList nodeGraph)
-          hasRemote = any (\p -> isRemote p (localPlat, hosts)) nodePlatforms
+      let hasRemote = any (\node -> isRemote (nodePlatform node) (localPlat, hosts)) (G.vertexList nodeGraph)
       -- A Sha is needed iff at least one remote lane is fanned out
       -- (setup nodes ship a bundle that gets @git checkout@'d on the
       -- remote at this SHA). @DumpRun@ uses 'shaPlaceholder' so
