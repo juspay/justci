@@ -222,12 +222,10 @@ runProtect opts = do
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
+  let nCtx = T.pack (show (length contexts))
   if opts.dryRun
     then do
-      TIO.putStrLn $
-        "would PATCH required_status_checks ("
-          <> T.pack (show (length contexts))
-          <> " contexts):"
+      TIO.putStrLn $ "would PATCH required_status_checks (" <> nCtx <> " contexts):"
       for_ contexts $ \c -> TIO.putStrLn $ "  " <> display c
     else do
       repo <- dieOnLeft =<< viewRepo
@@ -235,12 +233,7 @@ runProtect opts = do
         Just b -> pure b
         Nothing -> dieOnLeft =<< viewDefaultBranch
       dieOnLeft =<< setRequiredChecks repo branch contexts
-      TIO.putStrLn $
-        "updated required_status_checks on "
-          <> branch
-          <> " ("
-          <> T.pack (show (length contexts))
-          <> " contexts)"
+      TIO.putStrLn $ "updated required_status_checks on " <> branch <> " (" <> nCtx <> " contexts)"
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
