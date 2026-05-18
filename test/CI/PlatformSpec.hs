@@ -17,8 +17,8 @@ spec = do
   describe "parsePlatform" $ do
     it "parses x86_64-linux" $ parsePlatform "x86_64-linux" `shouldBe` Just X86_64Linux
     it "parses aarch64-linux" $ parsePlatform "aarch64-linux" `shouldBe` Just Aarch64Linux
-    it "parses x86_64-darwin" $ parsePlatform "x86_64-darwin" `shouldBe` Just X86_64Darwin
     it "parses aarch64-darwin" $ parsePlatform "aarch64-darwin" `shouldBe` Just Aarch64Darwin
+    it "rejects x86_64-darwin (dropped after nixpkgs 26.05)" $ parsePlatform "x86_64-darwin" `shouldBe` Nothing
     it "is case-insensitive" $ parsePlatform "AARCH64-DARWIN" `shouldBe` Just Aarch64Darwin
     it "rejects bare linux (must be a full tuple)" $ parsePlatform "linux" `shouldBe` Nothing
     it "rejects empty" $ parsePlatform "" `shouldBe` Nothing
@@ -29,21 +29,20 @@ spec = do
 
   describe "allPlatforms" $
     it "enumerates every constructor" $
-      allPlatforms `shouldBe` [X86_64Linux, Aarch64Linux, X86_64Darwin, Aarch64Darwin]
+      allPlatforms `shouldBe` [X86_64Linux, Aarch64Linux, Aarch64Darwin]
 
   describe "platformOs" $ do
     it "maps linux variants to Linux" $ do
       platformOs X86_64Linux `shouldBe` J.Linux
       platformOs Aarch64Linux `shouldBe` J.Linux
-    it "maps darwin variants to Macos" $ do
-      platformOs X86_64Darwin `shouldBe` J.Macos
+    it "maps the supported darwin variant to Macos" $
       platformOs Aarch64Darwin `shouldBe` J.Macos
 
   describe "osToPlatforms" $ do
     it "expands [linux] to both linux systems" $
       osToPlatforms J.Linux `shouldBe` [X86_64Linux, Aarch64Linux]
-    it "expands [macos] to both darwin systems" $
-      osToPlatforms J.Macos `shouldBe` [X86_64Darwin, Aarch64Darwin]
+    it "expands [macos] to the supported darwin system" $
+      osToPlatforms J.Macos `shouldBe` [Aarch64Darwin]
     it "rejects Unix (not a fanout target)" $
       osToPlatforms J.Unix `shouldBe` []
     it "rejects Windows" $

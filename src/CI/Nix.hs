@@ -44,7 +44,6 @@ import Language.Haskell.TH.Env (envQ')
 justDrvFor :: Platform -> FilePath
 justDrvFor X86_64Linux = $$(envQ' "CI_JUST_DRV_X86_64_LINUX")
 justDrvFor Aarch64Linux = $$(envQ' "CI_JUST_DRV_AARCH64_LINUX")
-justDrvFor X86_64Darwin = $$(envQ' "CI_JUST_DRV_X86_64_DARWIN")
 justDrvFor Aarch64Darwin = $$(envQ' "CI_JUST_DRV_AARCH64_DARWIN")
 
 -- | The @.drv@ store path as 'Text', ready for embedding in shell

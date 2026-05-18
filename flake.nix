@@ -22,7 +22,6 @@
       justDrvEnv = {
         CI_JUST_DRV_X86_64_LINUX   = drvStr nixpkgs.legacyPackages.x86_64-linux.just.drvPath;
         CI_JUST_DRV_AARCH64_LINUX  = drvStr nixpkgs.legacyPackages.aarch64-linux.just.drvPath;
-        CI_JUST_DRV_X86_64_DARWIN  = drvStr nixpkgs.legacyPackages.x86_64-darwin.just.drvPath;
         CI_JUST_DRV_AARCH64_DARWIN = drvStr nixpkgs.legacyPackages.aarch64-darwin.just.drvPath;
       };
 
