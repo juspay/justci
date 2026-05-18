@@ -12,12 +12,12 @@
 -- pattern match on 'NodeId' + the host lookup it already performed.
 --
 -- Remote setup nodes ship the @just@ derivation, bundle @HEAD@
--- across, and clone into
--- @~\/.cache\/ci\/\<short-sha\>\/\<platform\>\/src@. Idempotent:
--- same-SHA reruns hit the cached directory and skip the bundle.
--- Remote recipe nodes @cd@ into the same shared cached directory
--- (which their @depends_on@ setup node has already populated) and
--- run the realised @just --no-deps \<recipe\>@.
+-- across, and clone into the remote-side run dir
+-- (@${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/\<short-sha\>/\<platform\>/src@).
+-- Idempotent: same-SHA reruns hit the cached directory and skip the
+-- bundle. Remote recipe nodes @cd@ into the same shared cached
+-- directory (which their @depends_on@ setup node has already
+-- populated) and run the realised @just --no-deps \<recipe\>@.
 --
 -- The split collapses N bundle transfers (one per recipe per
 -- platform) down to one per remote per run, and to zero on cache
@@ -92,17 +92,38 @@ remoteRunner :: Host -> Text
 remoteRunner host = "ssh -T " <> display host
 
 -- | The shared checkout path on the remote, deterministic from
--- @(short-sha, platform)@: @\$HOME\/.cache\/ci\/\<short-sha\>\/\<platform\>@.
+-- @(short-sha, platform)@. Resolved at the *remote* shell:
+--
+-- @
+-- ${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/\<short-sha\>/\<platform\>
+-- @
+--
 -- The setup node clones into @\<cachedRunDir\>\/src@; recipe nodes
 -- @cd@ into the same path.
 --
+-- Why not @~\/.cache\/ci\/...@ — biome's project scanner has a
+-- case-sensitive @.cache@ filter on /any/ ancestor directory, so a
+-- checkout below @~\/.cache@ poisons every @biome lint@ invocation
+-- with phantom @noUndeclaredDependencies@ errors. Despite the name
+-- (which matches the CLI override env-var), the directory is
+-- /state/ in the XDG sense: SHA-pinned, runner-managed, intentionally
+-- outlives a single run. @\$XDG_STATE_HOME@ is the conformant home
+-- ('\$HOME/.local/state' default). The two-level override —
+-- @CI_CACHE_DIR@ → @XDG_STATE_HOME@ → @\$HOME/.local/state@ — lets
+-- runners with restricted writable homes opt in explicitly without
+-- having to set XDG vars project-wide. See juspay\/ci#21.
+--
 -- Across runs against the same SHA the directory persists, so
--- re-runs (e.g. @--from ci-only@) skip the bundle+clone entirely.
--- Garbage collection is the user's job — @rm -rf ~/.cache/ci@ when
--- disk pressure warrants.
+-- re-runs (e.g. @ci run e2e@ after fixing a flake) skip the
+-- bundle+clone entirely. Garbage collection is the user's job —
+-- @rm -rf ~\/.local\/state\/ci@ (or whatever override resolves to)
+-- when disk pressure warrants.
 cachedRunDir :: Sha -> Platform -> Text
 cachedRunDir sha targetPlat =
-  "$HOME/.cache/ci/" <> T.take shortShaLen (display sha) <> "/" <> display targetPlat
+  "${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/"
+    <> T.take shortShaLen (display sha)
+    <> "/"
+    <> display targetPlat
 
 -- | The remote-side shell snippet the setup node sends over ssh.
 -- Single-quoted on the way through so the local shell leaves @$DIR@

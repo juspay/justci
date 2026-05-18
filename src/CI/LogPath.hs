@@ -35,7 +35,7 @@ import System.FilePath ((</>))
 -- 140-char commit-status @description@ budget.
 --
 -- Both 'logDirFor' (local @.ci\/\<sha\>\/@ path) and 'CI.Transport.cachedRunDir'
--- (remote @\$HOME\/.cache\/ci\/\<sha\>\/@ path) must use the same prefix length so
+-- (remote @\${XDG_STATE_HOME:-\$HOME/.local/state}\/ci\/\<sha\>\/@ path) must use the same prefix length so
 -- a contributor can correlate the two directories. Import this constant rather
 -- than hardcoding @7@.
 shortShaLen :: Int

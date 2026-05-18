@@ -43,7 +43,10 @@ spec = do
       ("git bundle create" `T.isInfixOf` cmd) `shouldBe` True
 
     it "clones into the per-(sha,platform) cached run dir on the remote" $
-      ("$HOME/.cache/ci/0000000/aarch64-darwin" `T.isInfixOf` cmd) `shouldBe` True
+      ("${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/0000000/aarch64-darwin" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "never puts the checkout below ~/.cache (biome scanner trips on that, see #21)" $
+      (".cache/ci/" `T.isInfixOf` cmd) `shouldBe` False
 
     it "skips bundle+clone on cache hit" $
       ("cat > /dev/null; exit 0" `T.isInfixOf` cmd) `shouldBe` True
@@ -54,7 +57,7 @@ spec = do
         cmd = sshRecipeCommand host sha Aarch64Darwin "ci::build"
 
     it "cd's into the per-(sha,platform) cached run dir set up by the setup node" $
-      ("cd $HOME/.cache/ci/0000000/aarch64-darwin/src" `T.isInfixOf` cmd) `shouldBe` True
+      ("cd ${CI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ci}/0000000/aarch64-darwin/src" `T.isInfixOf` cmd) `shouldBe` True
 
     it "realises the drv on the remote and invokes /bin/just" $
       ("$(nix-store --realise" `T.isInfixOf` cmd) `shouldBe` True
