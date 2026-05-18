@@ -9,7 +9,7 @@
 -- crashing the consumer.
 module CI.NodeSpec (spec) where
 
-import CI.Node (NodeId (..), parseNodeId)
+import CI.Node (NodeId (..), NodeSelector (..), parseNodeId, parseSelector)
 import CI.Platform (Platform (..))
 import Data.Text.Display (display)
 import Test.Hspec
@@ -53,6 +53,34 @@ spec = do
 
     it "emits the reserved name for setup nodes" $
       display (SetupNode X86_64Linux) `shouldBe` "_ci-setup@x86_64-linux"
+
+  describe "parseSelector" $ do
+    it "parses a bare recipe name as SelRecipe" $
+      parseSelector "build" `shouldBe` Right (SelRecipe "build")
+
+    it "preserves :: in recipe FQNs" $
+      parseSelector "ci::default" `shouldBe` Right (SelRecipe "ci::default")
+
+    it "parses RECIPE@PLATFORM as SelRecipePlatform" $
+      parseSelector "build@x86_64-linux" `shouldBe` Right (SelRecipePlatform "build" X86_64Linux)
+
+    it "preserves :: in the recipe part of RECIPE@PLATFORM" $
+      parseSelector "ci::build@aarch64-darwin" `shouldBe` Right (SelRecipePlatform "ci::build" Aarch64Darwin)
+
+    it "rejects @ with an unknown platform suffix" $
+      case parseSelector "build@windows" of
+        Left msg -> msg `shouldContain` "no known platform suffix"
+        Right _ -> expectationFailure "expected Left"
+
+    it "rejects an empty selector" $
+      case parseSelector "" of
+        Left msg -> msg `shouldContain` "empty"
+        Right _ -> expectationFailure "expected Left"
+
+    it "rejects @PLATFORM with empty recipe part" $
+      case parseSelector "@x86_64-linux" of
+        Left msg -> msg `shouldContain` "empty recipe"
+        Right _ -> expectationFailure "expected Left"
 
   describe "round-trip" $ do
     let cases =

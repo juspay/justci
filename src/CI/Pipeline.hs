@@ -1,3 +1,5 @@
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -23,15 +25,17 @@ module CI.Pipeline
 where
 
 import qualified Algebra.Graph.AdjacencyMap as G
+import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
+import CI.CLI (RunOpts (..))
 import CI.CommitStatus (postStatusFor, seedPending)
 import CI.Gh (viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
-import CI.Hosts (Host, Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverrides)
+import CI.Hosts (Hosts, hostsPlatforms, loadHosts, lookupHost, mergeHostOverrides)
 import CI.Justfile (Attribute (..), Recipe (..), RecipeName, fetchDump, recipeCommand)
 import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
-import CI.Node (NodeId (..), nodePlatform, parseNodeId, toMermaid)
+import CI.Node (NodeId (..), NodeSelector (..), nodePlatform, parseNodeId, toMermaid)
 import CI.Platform (Platform, localPlatform, platformOs)
 import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
 import CI.ProcessCompose.Events (ProcessState (..), subscribeStates)
@@ -45,8 +49,9 @@ import Data.Foldable (for_)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
+import qualified Data.Set as Set
 import qualified Data.Text as T
-import Data.Text.Display (Display, display)
+import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
@@ -96,15 +101,15 @@ ensureRunDir = do
 -- the dirty live tree — the dev's uncommitted work is intentionally
 -- invisible to remote lanes; the bundle reflects committed history
 -- only.
-runLocal :: [(Platform, Host)] -> RunDir -> Bool -> [String] -> IO ()
-runLocal overrides dirs tui passthrough = do
-  hosts <- mergeHostOverrides overrides <$> (dieOnLeft =<< loadHosts)
-  pc <- buildProcessCompose hosts LocalRun
+runLocal :: RunOpts -> RunDir -> IO ()
+runLocal opts dirs = do
+  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
+  pc <- buildProcessCompose hosts opts.rootOverride opts.leaves opts.noDeps LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
     void $
-      runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml tui passthrough) pc
+      runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui opts.passthroughArgs) pc
   exitWithVerdict (hostFor hosts) outcomes
 
 -- | Strict mode: clean-tree refuse → resolve repo + SHA → snapshot HEAD
@@ -133,15 +138,15 @@ runLocal overrides dirs tui passthrough = do
 -- outcome (a failed node leaves pc exiting 0). The accumulated
 -- outcome map is the source of truth; 'exitWithVerdict' derives the
 -- final 'ExitCode' from it.
-runStrict :: [(Platform, Host)] -> RunDir -> Bool -> [String] -> IO ()
-runStrict overrides dirs tui passthrough = do
+runStrict :: RunOpts -> RunDir -> IO ()
+runStrict opts dirs = do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
-  hosts <- mergeHostOverrides overrides <$> (dieOnLeft =<< loadHosts)
+  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    pc <- buildProcessCompose hosts $ StrictRun dirs.worktreePath logDir
+    pc <- buildProcessCompose hosts opts.rootOverride opts.leaves opts.noDeps $ StrictRun dirs.worktreePath logDir
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     seedPending repo sha logDir nodes
@@ -151,7 +156,7 @@ runStrict overrides dirs tui passthrough = do
             >> recordOutcome outcomes node ps
     withObserver dirs.sock onState $
       void $
-        runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml tui passthrough) pc
+        runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui opts.passthroughArgs) pc
     exitWithVerdict (hostFor hosts) outcomes
 
 -- | Print the assembled pipeline's dependency graph to stdout in
@@ -172,7 +177,7 @@ runStrict overrides dirs tui passthrough = do
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts DumpRun
+  pc <- buildProcessCompose hosts Nothing [] False DumpRun
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -182,7 +187,7 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- buildProcessCompose hosts DumpRun
+  pc <- buildProcessCompose hosts Nothing [] False DumpRun
   BS.putStr (Y.encode pc)
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
@@ -288,13 +293,32 @@ yamlPathsFor DumpRun = (const Nothing, const Nothing)
 --    depending on whether its platform matches the runner's; the
 --    'CI.Transport.commandFor' rendering is the only site that knows
 --    SSH command shapes.
-buildProcessCompose :: Hosts -> RunMode -> IO ProcessCompose
-buildProcessCompose hosts mode = do
+buildProcessCompose ::
+  Hosts ->
+  -- | DAG root override. 'Nothing' = discover via the
+  --   @[metadata("ci")]@ attribute on a recipe.
+  Maybe RecipeName ->
+  -- | Positional selectors restricting the DAG. Empty = full DAG.
+  [NodeSelector] ->
+  -- | With selectors set, run only the named nodes (skip their
+  --   transitive dependencies). Ignored when selectors is empty.
+  Bool ->
+  RunMode ->
+  IO ProcessCompose
+buildProcessCompose hosts rootOverride leaves noDeps mode = do
   recipes <- dieOnLeft =<< fetchDump
-  rootName <- dieOnLeft $ findRoot recipes
+  rootName <- case rootOverride of
+    Just r
+      | Map.member r recipes -> pure r
+      | otherwise ->
+          die $
+            "--root "
+              <> T.unpack (display r)
+              <> " is not a recipe in the justfile"
+    Nothing -> dieOnLeft $ findRoot recipes
   rootRecipe <- case Map.lookup rootName recipes of
     Just r -> pure r
-    -- findRoot guarantees this; the lookup is defensive.
+    -- findRoot / the membership check above guarantee this; the lookup is defensive.
     Nothing -> die $ "internal error: root " <> T.unpack (display rootName) <> " missing from recipe map"
   reachable <- dieOnLeft $ reachableSubgraph rootName recipes
   recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
@@ -309,12 +333,16 @@ buildProcessCompose hosts mode = do
           <> " or add an entry to ~/.config/ci/hosts.json for one of: "
           <> unwords (show <$> rootOsFamilies rootRecipe)
     _ -> pure ()
-  let nodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
-      -- Same predicate 'fanOut' uses to decide where to emit setup
-      -- nodes — sourcing both from one definition avoids the dormant
-      -- divergence risk of two near-identical "is this platform
-      -- remote?" predicates.
-      hasRemote = any (\p -> isRemote p (localPlat, hosts)) pipelinePlatforms
+  let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
+  nodeGraph <- dieOnLeft $ applySelectors leaves noDeps pipelinePlatforms unfilteredNodeGraph
+  -- Same predicate 'fanOut' uses to decide where to emit setup
+  -- nodes — sourcing both from one definition avoids the dormant
+  -- divergence risk of two near-identical "is this platform
+  -- remote?" predicates. Computed over the *filtered* node set so
+  -- a partial run that excluded every remote lane doesn't ask for
+  -- a SHA it doesn't need.
+  let nodePlatforms = nub (nodePlatform <$> G.vertexList nodeGraph)
+      hasRemote = any (\p -> isRemote p (localPlat, hosts)) nodePlatforms
   -- A Sha is needed iff at least one remote lane is fanned out
   -- (setup nodes ship a bundle that gets @git checkout@'d on the
   -- remote at this SHA). @DumpRun@ uses 'shaPlaceholder' so
@@ -405,6 +433,80 @@ fanOut localPlat hosts platforms g =
 isRemote :: Platform -> (Platform, Hosts) -> Bool
 isRemote p (localPlat, hosts) =
   isJust (lookupHost p hosts) || p /= localPlat
+
+-- | A user-supplied 'NodeSelector' that doesn't resolve to any node
+-- in the fanned-out graph. Carries the selector verbatim so the
+-- error message echoes the exact token from argv.
+newtype SelectionError = SelectorNotInPipeline NodeSelector
+  deriving stock (Show)
+
+instance Display SelectionError where
+  displayBuilder (SelectorNotInPipeline s) =
+    "selector "
+      <> displayBuilder s
+      <> " did not match any node in the pipeline DAG (check the root, OS attributes, and hosts.json)"
+
+-- | Restrict the fanned-out graph to the user's positional selectors
+-- (or return the full graph if no selectors were given).
+--
+--   * Empty selectors → identity. The pipeline runs the full DAG.
+--   * Each 'SelRecipe' expands to every @(recipe, platform)@ pair in
+--     the pipeline's platform set; 'SelRecipePlatform' pins to one.
+--   * @noDeps = False@ (the default): keep each seed plus everything
+--     reachable from it along the runner DAG's @depends_on@ edges. On
+--     remote platforms this auto-includes the 'SetupNode' because
+--     every recipe node depends on it.
+--   * @noDeps = True@: keep only the seeds. The setup-node auto-include
+--     still applies — running a remote recipe without its setup would
+--     emit a dangling @depends_on@ in the YAML.
+applySelectors ::
+  [NodeSelector] ->
+  Bool ->
+  [Platform] ->
+  G.AdjacencyMap NodeId ->
+  Either SelectionError (G.AdjacencyMap NodeId)
+applySelectors [] _ _ g = Right g
+applySelectors selectors noDeps platforms g = do
+  seeds <- nub . concat <$> traverse (resolveSelector allNodes platforms) selectors
+  let baseKeep =
+        if noDeps
+          then Set.fromList seeds
+          else Set.fromList (concatMap (G.reachable g) seeds)
+      -- Auto-include the SetupNode for any selected remote-platform
+      -- recipe even under @--no-deps@, so the emitted YAML never
+      -- references a setup node we dropped.
+      requiredSetup =
+        Set.fromList
+          [ SetupNode p
+          | RecipeNode _ p <- Set.toList baseKeep,
+            SetupNode p `Set.member` allNodes
+          ]
+      keep = baseKeep `Set.union` requiredSetup
+  pure (G.induce (`Set.member` keep) g)
+  where
+    allNodes = G.vertexSet g
+
+-- | Map one 'NodeSelector' onto the matching 'NodeId's in the
+-- fanned-out graph, failing with 'SelectorNotInPipeline' if the
+-- selector resolves to nothing. A bare 'SelRecipe' fans out across
+-- every pipeline platform present in the graph; a
+-- 'SelRecipePlatform' pins to the exact pair.
+resolveSelector ::
+  Set.Set NodeId ->
+  [Platform] ->
+  NodeSelector ->
+  Either SelectionError [NodeId]
+resolveSelector allNodes platforms = \case
+  SelRecipe r ->
+    let candidates = [RecipeNode r p | p <- platforms]
+        present = filter (`Set.member` allNodes) candidates
+     in if null present
+          then Left (SelectorNotInPipeline (SelRecipe r))
+          else Right present
+  s@(SelRecipePlatform r p) ->
+    if RecipeNode r p `Set.member` allNodes
+      then Right [RecipeNode r p]
+      else Left (SelectorNotInPipeline s)
 
 -- | Per-node command construction. Dispatches over (host lookup,
 -- node kind) and picks one of the three valid command builders in

@@ -1,3 +1,5 @@
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | argv parser for the @ci@ executable. Three subcommands —
@@ -18,16 +20,22 @@ module CI.CLI
 where
 
 import CI.Hosts (Host, hostFromText)
+import CI.Justfile (RecipeName, recipeNameFromText)
+import CI.Node (NodeSelector, parseSelector)
 import CI.Platform (Platform, parsePlatform)
-import Control.Applicative (many, (<|>))
+import Control.Applicative (many, optional, (<|>))
 import qualified Data.Text as T
 import Options.Applicative
   ( Parser,
     ParserInfo,
+    ParserResult,
     ReadM,
+    argument,
+    defaultPrefs,
     eitherReader,
-    execParser,
+    execParserPure,
     fullDesc,
+    handleParseResult,
     help,
     helper,
     info,
@@ -35,12 +43,12 @@ import Options.Applicative
     metavar,
     option,
     progDesc,
-    strArgument,
     subparser,
     switch,
     (<**>),
   )
 import qualified Options.Applicative as O (command)
+import System.Environment (getArgs)
 
 -- | Parsed argv: just the chosen subcommand. All per-mode knobs live
 -- inside their subcommand's option record ('RunOpts' for @run@) —
@@ -60,19 +68,49 @@ data Command
 --   * @tui@: drive process-compose's TUI instead of its headless logger.
 --   * @hostOverrides@: overlay onto @~\/.config\/ci\/hosts.json@ via
 --     'CI.Hosts.mergeHostOverrides'; CLI entries win on collision.
+--   * @rootOverride@: use the named recipe as the DAG root instead of
+--     whichever recipe carries @[metadata("ci")]@. Empty by default.
+--   * @leaves@: restrict the DAG to these (recipe, optionally platform)
+--     selectors and their transitive dependencies. Empty list = run
+--     the full DAG.
+--   * @noDeps@: with @leaves@ set, skip the transitive expansion and
+--     run only the named selectors themselves.
 --   * @passthroughArgs@: everything after @--@; forwarded verbatim to
 --     @process-compose up@.
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
+    rootOverride :: Maybe RecipeName,
+    leaves :: [NodeSelector],
+    noDeps :: Bool,
     passthroughArgs :: [String]
   }
 
 -- | Parse argv and return the structured 'Args'. Bad flags and
 -- @--help@ exit the process via optparse-applicative's standard
 -- handler — callers see only a successful parse.
+--
+-- The argv is split around the first @--@ before optparse sees it:
+-- pre-@--@ tokens go through the parser as flags + positional leaf
+-- selectors; post-@--@ tokens are stashed verbatim into
+-- 'RunOpts.passthroughArgs' (only meaningful on the @run@ subcommand).
+-- This is what lets @ci run e2e -- -t=true@ keep working: the @--@
+-- separates leaf selectors from process-compose passthrough.
 parseCli :: IO Args
-parseCli = execParser parserInfo
+parseCli = do
+  raw <- getArgs
+  let (pre, post) = case break (== "--") raw of
+        (xs, "--" : ys) -> (xs, ys)
+        _ -> (raw, [])
+  args <- handleParseResult (execParserPure defaultPrefs parserInfo pre :: ParserResult Args)
+  pure (injectPassthrough post args)
+
+-- | Stash the post-@--@ argv tail into 'RunOpts.passthroughArgs'. A
+-- no-op on non-@Run@ subcommands (they don't carry passthrough).
+injectPassthrough :: [String] -> Args -> Args
+injectPassthrough [] args = args
+injectPassthrough post (Args (Run opts)) = Args (Run (opts {passthroughArgs = post}))
+injectPassthrough _ args = args
 
 parserInfo :: ParserInfo Args
 parserInfo =
@@ -104,7 +142,42 @@ runOptsParser =
               <> help "Override the ~/.config/ci/hosts.json mapping for this run. Repeatable; e.g. --host x86_64-linux=root@lxc-foo. CLI overrides win over the file; platforms not named here still consult the file."
           )
       )
-    <*> many (strArgument (metavar "-- ARGS..."))
+    <*> optional
+      ( option
+          recipeNameReader
+          ( long "root"
+              <> metavar "RECIPE"
+              <> help "Use RECIPE as the DAG root instead of whichever recipe carries [metadata(\"ci\")]. The pipeline fans out across its OS attributes as usual."
+          )
+      )
+    <*> many
+      ( argument
+          selectorReader
+          ( metavar "RECIPE[@PLATFORM]..."
+              <> help "Restrict the run to these recipes and their dependencies. Each positional is either a bare recipe (fans out across every pipeline platform) or RECIPE@PLATFORM (pin to one platform). Use --no-deps to skip the transitive expansion. Setup nodes are auto-included for every remote platform a selected recipe lands on."
+          )
+      )
+    <*> switch
+      ( long "no-deps"
+          <> help "With positional RECIPE[@PLATFORM] selectors, run only the named nodes — do not transitively expand their dependencies. Mirrors `just --no-deps`."
+      )
+    -- 'passthroughArgs' is filled in by 'injectPassthrough' from the
+    -- post-@--@ tail; the parser itself never sees those tokens.
+    <*> pure []
+
+-- | Parse a single positional @RECIPE[\@PLATFORM]@ selector. Delegates
+-- to 'parseSelector' in "CI.Node" — the same parsing rule the
+-- 'NodeSelector' wire form documents.
+selectorReader :: ReadM NodeSelector
+selectorReader = eitherReader (parseSelector . T.pack)
+
+-- | Parse a single recipe name for @--root@. 'recipeNameFromText' is
+-- total, so the only failure mode here is the empty string.
+recipeNameReader :: ReadM RecipeName
+recipeNameReader = eitherReader $ \s ->
+  if null s
+    then Left "empty recipe name in --root"
+    else Right (recipeNameFromText (T.pack s))
 
 -- | Parse a single @PLATFORM=ADDR@ argument into a typed pair. The
 -- platform must be one of the 'Platform' constructors'

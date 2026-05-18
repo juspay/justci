@@ -28,6 +28,10 @@ module CI.Node
     -- * Wire round-trip
     parseNodeId,
 
+    -- * User-input selectors
+    NodeSelector (..),
+    parseSelector,
+
     -- * Graph rendering
     toMermaid,
   )
@@ -117,6 +121,45 @@ parseNodeId t = case T.breakOnEnd "@" t of
       "" -> Nothing
       n | n == setupNodeName -> Just (SetupNode p)
       _ -> Just (RecipeNode (recipeNameFromText nameText) p)
+
+-- | A user-supplied DAG filter — what @ci run e2e@ or
+-- @ci run e2e\@x86_64-linux@ resolves to before the pipeline restricts
+-- the fanned-out graph to it. Strictly less informative than 'NodeId':
+-- 'SelRecipe' fans out across every pipeline platform; 'SelRecipePlatform'
+-- pins to one. Setup nodes are never user-selectable — they ride along
+-- automatically because every remote recipe depends on them.
+data NodeSelector
+  = SelRecipe RecipeName
+  | SelRecipePlatform RecipeName Platform
+  deriving stock (Show, Eq, Ord)
+
+-- | Render in the same @\<recipe\>\[\@\<platform\>\]@ shape the user
+-- typed it in. Used in error messages so an "unknown selector"
+-- complaint echoes the exact token from argv.
+instance Display NodeSelector where
+  displayBuilder (SelRecipe r) = displayBuilder r
+  displayBuilder (SelRecipePlatform r p) = displayBuilder r <> "@" <> displayBuilder p
+
+-- | Parse a positional CLI selector @RECIPE[\@PLATFORM]@. An @\@@ is
+-- mandatory if a platform is intended; the suffix must then be a
+-- known 'Platform'. A bare token with no @\@@ becomes 'SelRecipe';
+-- a token with @\@@ whose suffix is /not/ a valid platform is rejected
+-- (the user almost certainly typo'd a platform, not authored a
+-- recipe with @\@@ in its name).
+parseSelector :: Text -> Either String NodeSelector
+parseSelector t
+  | T.null t = Left "empty selector"
+  | otherwise = case T.breakOnEnd "@" t of
+      ("", _) -> Right (SelRecipe (recipeNameFromText t))
+      (prefixWithSep, suffix) -> case parsePlatform suffix of
+        Just p ->
+          let nameText = T.dropEnd 1 prefixWithSep
+           in if T.null nameText
+                then Left $ "selector " <> T.unpack t <> " has empty recipe part"
+                else Right (SelRecipePlatform (recipeNameFromText nameText) p)
+        Nothing ->
+          Left $
+            "selector " <> T.unpack t <> " has @ but no known platform suffix (expected x86_64-linux, aarch64-linux, or aarch64-darwin)"
 
 -- | Render an adjacency map of 'NodeId's as Mermaid @flowchart TD@.
 -- Vertex IDs are sanitized to mermaid-safe alphanumeric+underscore;
