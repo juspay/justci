@@ -38,6 +38,7 @@ module CI.CommitStatus
 
     -- * Naming convention
     contextForNode,
+    isUserVisible,
 
     -- * === Internal (test surface) ===
     terminalToCommitStatus,

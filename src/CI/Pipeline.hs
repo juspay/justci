@@ -28,7 +28,7 @@ where
 import qualified Algebra.Graph.AdjacencyMap as G
 import qualified Algebra.Graph.AdjacencyMap.Algorithm as G
 import CI.CLI (ProtectOpts (..), RunOpts (..))
-import CI.CommitStatus (contextForNode, newTimings, postStatusFor, seedPending)
+import CI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
 import CI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import CI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import CI.Graph (lowerToRunnerGraph, reachableSubgraph)
@@ -216,10 +216,7 @@ runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
   pc <- buildProcessCompose hosts Nothing [] False DumpRun
-  let contexts =
-        [ contextForNode n
-        | n@(RecipeNode _ _) <- processNames pc
-        ]
+  let contexts = contextForNode <$> filter isUserVisible (processNames pc)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
