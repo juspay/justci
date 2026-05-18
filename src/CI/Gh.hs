@@ -18,8 +18,10 @@ module CI.Gh
     Context,
     CommitStatusPost (..),
 
-    -- * Operations
+    -- * Errors
     GhError,
+
+    -- * Operations
     viewRepo,
     viewDefaultBranch,
     contextFrom,
