@@ -29,6 +29,6 @@ dependencies:
   content_hash: sha256:b4c49cbb5308a43ac20ae76f7dfa77f56a102b13625c6cc6313f801c104359ca
 local_deployed_files:
 - .claude/rules/workflow.md
-- .claude/skills/justci
+- .claude/skills/ci
 local_deployed_file_hashes:
   .claude/rules/workflow.md: sha256:babf61cdd29cfc8f03b3d20f17b4bf13ef5f173dc05640bc83c505dca4b42010

@@ -1,5 +1,5 @@
 ---
-name: justci
+name: ci
 description: Reference for the `justci` runner — how to invoke a full pipeline, a single recipe, or a platform-pinned node from a project that depends on `juspay/justci`. Trigger when the user asks to "run justci", "run the pipeline", "re-run a check", or names a specific recipe by `<recipe>@<platform>`.
 ---
 
