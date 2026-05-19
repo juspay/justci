@@ -79,8 +79,6 @@ dependencies:
 
 The skill is just documentation — it doesn't ship the runner itself. The consumer's project gets `ci` from this flake (`nix run github:juspay/ci -- run`) or a pinned version in its own `flake.nix`.
 
-> A previous iteration of this PR also exposed pc's built-in MCP server via `ci run --mcp`; reverted because `process-compose up` auto-starts every process at MCP launch, which is the opposite of what agent-introspection wants. The follow-up design lives at [#22](https://github.com/juspay/ci/issues/22).
-
 ## Roadmap
 
 - Per-recipe OS-attribute filtering: today a recipe is replicated to every pipeline platform regardless of its own `[linux]/[macos]` attribute (and the remote `just` refuses if the recipe isn't enabled on that host). A future pass at our layer would prune those nodes upfront so the verdict surface doesn't show them as `Failed`.
