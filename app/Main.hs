@@ -7,8 +7,8 @@
 -- @CI=true@ mode gate that picks between 'runLocal' and 'runStrict'.
 module Main where
 
-import CI.CLI (Args (..), Command (..), parseCli)
-import CI.Pipeline (ensureRunDir, runDumpYaml, runGraph, runLocal, runProtect, runStrict)
+import CI.CLI (Args (..), Command (..), RunOpts (..), parseCli)
+import CI.Pipeline (ensureRunDir, runDumpYaml, runGraph, runLocal, runMcp, runProtect, runStrict)
 import System.Environment (lookupEnv)
 
 main :: IO ()
@@ -17,9 +17,12 @@ main = do
   case args.cmd of
     Run opts -> do
       dirs <- ensureRunDir
-      strict <- (== Just "true") <$> lookupEnv "CI"
-      let runner = if strict then runStrict else runLocal
-      runner opts passthrough dirs
+      if opts.mcp
+        then runMcp opts passthrough dirs
+        else do
+          strict <- (== Just "true") <$> lookupEnv "CI"
+          let runner = if strict then runStrict else runLocal
+          runner opts passthrough dirs
     DumpYaml -> runDumpYaml
     Graph -> runGraph
     Protect opts -> runProtect opts

@@ -19,6 +19,7 @@ module CI.Pipeline
     -- * Run modes
     runLocal,
     runStrict,
+    runMcp,
     runGraph,
     runDumpYaml,
     runProtect,
@@ -44,7 +45,7 @@ import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
 import CI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
 import CI.Platform (Platform, localPlatform)
-import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, stdioMcp, toProcessCompose, withMcpServer)
+import CI.ProcessCompose (ProcessCompose, UpInvocation (..), disableAllProcesses, processGraph, processNames, runProcessCompose, stdioMcp, toProcessCompose, withMcpServer)
 import CI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import CI.Root (findRoot)
 import CI.Transport (sshRecipeCommand, sshSetupCommand)
@@ -60,7 +61,7 @@ import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
-import System.Exit (die)
+import System.Exit (die, exitWith)
 import System.FilePath ((</>))
 
 -- | The runtime artifact paths under @\$PWD\/.ci\/@. Built once at the top
@@ -165,6 +166,37 @@ runStrict opts passthrough dirs = do
         runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
     exitWithVerdict (hostFor hosts) outcomes
 
+-- | MCP-server mode. Spawn pc with @mcp_server: { transport: stdio }@
+-- and every process @disabled: true@ — pc runs as a JSON-RPC host on
+-- stdin/stdout, the MCP tools list the registered pipeline, and the
+-- attached agent decides what to execute via @pc_process_start@.
+--
+-- No observer, no outcome accumulator, no verdict summary: this
+-- isn't a CI run, it's an interactive session. pc's own exit code
+-- is forwarded as the runner's exit code; @--keep-project@ is
+-- injected so pc stays alive while the MCP session is open even if
+-- the agent never starts a process (or starts then-terminates all
+-- of them).
+--
+-- @--tui@ is forced off — pc auto-disables it anyway under stdio
+-- transport, but spelling it explicitly here documents the
+-- incompatibility at the call site.
+--
+-- The SHA baked into the YAML (for remote @ssh@ commands) is
+-- frozen at the moment @ci run --mcp@ launches. Working-tree edits
+-- to local lanes still take effect on each subsequent
+-- @pc_process_start@, but remote lanes always operate against the
+-- pinned SHA; to follow a new commit, the user restarts the MCP
+-- session.
+runMcp :: RunOpts -> [String] -> RunDir -> IO ()
+runMcp opts passthrough dirs = do
+  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
+  pc <- attachMcp opts <$> (dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun)
+  let mcpPassthrough = "--keep-project" : passthrough
+      up = UpInvocation dirs.sock dirs.pcLog dirs.pcYaml False mcpPassthrough
+  exitCode <- runProcessCompose up pc
+  exitWith exitCode
+
 -- | Print the assembled pipeline's dependency graph to stdout in
 -- Mermaid @flowchart@ syntax. Uses the same 'DumpRun' shape
 -- @dump-yaml@ uses, so the rendered graph reflects the full fanout
@@ -256,14 +288,17 @@ createPlatformDirs logDir nodes =
 withParsedNode :: ProcessState -> (NodeId -> IO ()) -> IO ()
 withParsedNode ps action = for_ (parseNodeId ps.name) action
 
--- | Overlay 'CI.ProcessCompose.stdioMcp' onto the assembled YAML when
--- @ci run --mcp@ is set; otherwise leave the @mcp_server@ field
--- unset. Stdio is the only transport the CLI surfaces today —
--- 'CI.ProcessCompose.Sse' is named in the wire vocabulary but not
--- wired to a flag (no need until something asks for it).
+-- | Apply the @--mcp@ overlay to an assembled YAML: attach
+-- 'CI.ProcessCompose.stdioMcp' /and/ mark every process @disabled@.
+-- pc spawns, the MCP server is reachable on stdio, the project
+-- registers all 14-or-so nodes, but /none/ of them auto-start.
+-- The attached agent decides what to run via @pc_process_start@
+-- — the runner is purely a host for pc; it doesn't drive
+-- execution itself when MCP is on. Without @--mcp@, leave the YAML
+-- exactly as 'toProcessCompose' built it.
 attachMcp :: RunOpts -> ProcessCompose -> ProcessCompose
 attachMcp opts pc
-  | opts.mcp = withMcpServer stdioMcp pc
+  | opts.mcp = disableAllProcesses (withMcpServer stdioMcp pc)
   | otherwise = pc
 
 -- | Bracket @body@ between a 'subscribeStates' subscription on @sock@

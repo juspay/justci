@@ -23,6 +23,7 @@ module CI.ProcessCompose
     McpTransport (..),
     stdioMcp,
     withMcpServer,
+    disableAllProcesses,
 
     -- * Invocation
     UpInvocation (..),
@@ -75,6 +76,18 @@ data ProcessCompose = ProcessCompose
 -- MCP support landed.
 instance ToJSON ProcessCompose where
   toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+
+-- | Mark every process as @disabled: true@. Used together with
+-- 'withMcpServer' in @ci run --mcp@ so pc spawns, the MCP server
+-- is available on stdio, and pc registers every recipe + setup
+-- node in the project — but auto-starts /none/ of them. The
+-- attached agent drives execution explicitly via @pc_process_start@,
+-- which is the whole point of agent-mediated runs.
+disableAllProcesses :: ProcessCompose -> ProcessCompose
+disableAllProcesses pc =
+  pc {processes = Map.map disable pc.processes}
+  where
+    disable p = p {disabled = Just True}
 
 -- | Attach an 'McpServerConfig' to an already-assembled 'ProcessCompose'.
 -- Returns a fresh record with @mcp_server@ populated; the caller is
@@ -153,7 +166,13 @@ data Process = Process
     --     to split per-recipe output into @.ci\/\<sha\>\/\<recipe\>.log@ so
     --     the GitHub commit status can embed a navigable path to the failing
     --     log. 'Nothing' falls back to the global log.
-    log_location :: Maybe FilePath
+    log_location :: Maybe FilePath,
+    -- | When 'Just True', process-compose registers the process in the
+    --     project (so MCP introspection sees it) but does not auto-start
+    --     it on @up@. An attached agent calls @pc_process_start \<name\>@
+    --     to launch it on demand. 'Nothing' omits the field — pc's default
+    --     auto-starts the process.
+    disabled :: Maybe Bool
   }
   deriving stock (Generic)
 
@@ -240,7 +259,8 @@ toProcessCompose mkCommand mkWorkingDir mkLogLocation g =
           depends_on = Map.fromSet (const (Dependency ProcessCompletedSuccessfully)) (G.postSet node g),
           availability = Availability {restart = No, exit_on_skipped = False},
           working_dir = mkWorkingDir node,
-          log_location = mkLogLocation node
+          log_location = mkLogLocation node,
+          disabled = Nothing
         }
 
 -- | The pc namespace label for a 'NodeId'. Derived structurally from
