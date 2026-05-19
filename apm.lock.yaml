@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-05-19T17:15:59.552954+00:00'
+generated_at: '2026-05-19T18:43:53.734493+00:00'
 apm_version: 0.14.0
 dependencies:
 - repo_url: srid/agency
@@ -29,6 +29,6 @@ dependencies:
   content_hash: sha256:b4c49cbb5308a43ac20ae76f7dfa77f56a102b13625c6cc6313f801c104359ca
 local_deployed_files:
 - .claude/rules/workflow.md
-- .claude/skills/ci
+- .claude/skills/justci
 local_deployed_file_hashes:
   .claude/rules/workflow.md: sha256:babf61cdd29cfc8f03b3d20f17b4bf13ef5f173dc05640bc83c505dca4b42010

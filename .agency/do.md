@@ -11,7 +11,7 @@ nix develop -c cabal build
 ## Test command
 
 ```sh
-just ci run-check
+just justci run-check
 ```
 
 ## CI command
@@ -20,10 +20,10 @@ just ci run-check
 CI=true nix run . -- run
 ```
 
-`ci run` self-hosts: it translates the `just` recipe graph into a
-`process-compose` config and drives the pipeline through `ci run-step
+`justci run` self-hosts: it translates the `just` recipe graph into a
+`process-compose` config and drives the pipeline through `justci run-step
 <recipe>` wrappers. `CI=true` flips each wrapper into status-posting
-mode, so a GitHub commit status (`ci/<recipe>`) is posted at start,
+mode, so a GitHub commit status (`justci/<recipe>`) is posted at start,
 success, and failure for every recipe — there is no separate hosted
 CI workflow.
 
