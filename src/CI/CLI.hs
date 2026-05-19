@@ -99,7 +99,8 @@ data ProtectOpts = ProtectOpts
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
-    dagSelection :: DagSelection
+    dagSelection :: DagSelection,
+    mcp :: Bool
   }
 
 -- | Parse argv and return the structured 'Args' alongside the raw
@@ -173,6 +174,10 @@ runOptsParser =
           )
       )
     <*> dagSelectionParser
+    <*> switch
+      ( long "mcp"
+          <> help "Expose process-compose's introspection + control surface as an MCP server over stdio. Pc takes over stdin/stdout for the JSON-RPC frames (the TUI is auto-disabled); intended for agent clients like Claude Desktop / Cursor that spawn `ci run --mcp` as a subprocess."
+      )
 
 -- | Parse @--root@ + positional selectors + @--no-deps@ into a single
 -- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so

@@ -18,6 +18,12 @@ module CI.ProcessCompose
     processNames,
     processGraph,
 
+    -- * MCP server config
+    McpServerConfig (..),
+    McpTransport (..),
+    stdioMcp,
+    withMcpServer,
+
     -- * Invocation
     UpInvocation (..),
     runProcessCompose,
@@ -55,10 +61,70 @@ snakeCaseTag =
       tagSingleConstructors = True
     }
 
--- | Top-level @process-compose.yaml@: a map from process name to spec.
-newtype ProcessCompose = ProcessCompose {processes :: Map.Map NodeId Process}
+-- | Top-level @process-compose.yaml@: a map from process name to spec,
+-- plus an optional 'mcp_server' block that turns the spawned pc into
+-- an MCP server (introspection + control over the running pipeline).
+data ProcessCompose = ProcessCompose
+  { processes :: Map.Map NodeId Process,
+    mcp_server :: Maybe McpServerConfig
+  }
+  deriving stock (Generic)
+
+-- Custom instance so 'Nothing' in 'mcp_server' drops the field
+-- entirely — the default project YAML stays exactly as it was before
+-- MCP support landed.
+instance ToJSON ProcessCompose where
+  toJSON = genericToJSON defaultOptions {omitNothingFields = True}
+
+-- | Attach an 'McpServerConfig' to an already-assembled 'ProcessCompose'.
+-- Returns a fresh record with @mcp_server@ populated; the caller is
+-- typically @CI.Pipeline.runLocal@ / @runStrict@ when @ci run --mcp@
+-- is set, doing the override after 'toProcessCompose' built the
+-- baseline graph.
+withMcpServer :: McpServerConfig -> ProcessCompose -> ProcessCompose
+withMcpServer cfg pc = pc {mcp_server = Just cfg}
+
+-- | Pc's MCP transport. SSE is the HTTP-based default; stdio takes
+-- over pc's own stdin\/stdout (which auto-disables the TUI). Today
+-- only the stdio path has a CLI hook ('CI.CLI.RunOpts.mcp' + 'stdioMcp');
+-- 'Sse' is named here so the wire vocabulary is complete and adding
+-- an SSE flag later is a one-line addition.
+data McpTransport = Sse | Stdio
+  deriving stock (Show, Eq, Generic)
+
+instance ToJSON McpTransport where
+  toJSON Sse = "sse"
+  toJSON Stdio = "stdio"
+
+-- | The @mcp_server@ YAML block. Field names match pc's keys
+-- verbatim. 'host' and 'port' are SSE-only; pc tolerates their
+-- presence under stdio transport and ignores them.
+--
+-- @expose_control_tools@ governs whether MCP clients can drive pc
+-- (start\/stop\/restart processes) on top of read-only introspection.
+-- 'stdioMcp' sets it to 'True' so an agent attached over stdio can
+-- recover from a failed recipe by restarting it rather than re-running
+-- the whole pipeline.
+data McpServerConfig = McpServerConfig
+  { host :: Text,
+    port :: Int,
+    transport :: McpTransport,
+    expose_control_tools :: Bool
+  }
   deriving stock (Generic)
   deriving anyclass (ToJSON)
+
+-- | The canonical stdio-transport MCP config: @transport: stdio@
+-- with @expose_control_tools: true@. @host@\/@port@ are populated
+-- with placeholders (pc ignores them under stdio).
+stdioMcp :: McpServerConfig
+stdioMcp =
+  McpServerConfig
+    { host = "localhost",
+      port = 0,
+      transport = Stdio,
+      expose_control_tools = True
+    }
 
 -- | One @processes.<name>@ entry. Field names match @process-compose@'s YAML keys.
 data Process = Process
@@ -162,7 +228,10 @@ toProcessCompose ::
   G.AdjacencyMap NodeId ->
   ProcessCompose
 toProcessCompose mkCommand mkWorkingDir mkLogLocation g =
-  ProcessCompose $ Map.fromSet mkProcess (G.vertexSet g)
+  ProcessCompose
+    { processes = Map.fromSet mkProcess (G.vertexSet g),
+      mcp_server = Nothing
+    }
   where
     mkProcess node =
       Process
@@ -187,7 +256,7 @@ namespaceFor (RecipeNode _ _) = "recipes"
 -- for every @(recipe, platform)@ before process-compose has begun
 -- scheduling them).
 processNames :: ProcessCompose -> [NodeId]
-processNames (ProcessCompose ps) = Map.keys ps
+processNames pc = Map.keys pc.processes
 
 -- | All inputs that shape a @process-compose up@ invocation. The YAML
 -- config is materialised to @yamlPath@ before the spawn (rather than
@@ -240,7 +309,9 @@ runProcessCompose up pc = do
 -- a YAML file), so re-deriving the structure here is the path
 -- that works without a live run.
 processGraph :: ProcessCompose -> G.AdjacencyMap NodeId
-processGraph (ProcessCompose ps) =
+processGraph pc =
   G.vertices (Map.keys ps)
     `G.overlay` G.edges
       [(name, dep) | (name, p) <- Map.toList ps, dep <- Map.keys p.depends_on]
+  where
+    ps = pc.processes
