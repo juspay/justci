@@ -61,11 +61,27 @@ Every emitted process is `restart: no` and `exit_on_skipped: false`, so one fail
 
 ## Subcommands
 
-- `ci run [--tui] [--host PLATFORM=ADDR ...] [--root RECIPE] [--no-deps] [RECIPE[@PLATFORM]...] [-- <args>]` (default): drive the pipeline; anything after `--` is forwarded verbatim to `process-compose up`. `--tui` swaps process-compose's headless logger for its interactive tcell view — useful for poking at long-running pipelines locally. `--host PLATFORM=ADDR` is repeatable and overlays onto `~/.config/ci/hosts.json` (see _Remote builds over SSH_ above). `--root` replaces the DAG root that `[metadata("ci")]` would have picked; positional `RECIPE[@PLATFORM]` selectors restrict the run to those nodes and their transitive dependencies (e.g. `ci run e2e@x86_64-linux` re-runs just that one node after a flaky `e2e` lane). The status context (`<recipe>@<platform>`) is unchanged, so a partial re-run overwrites the same GitHub check the full run wrote. `--no-deps` is the `just`-style escape hatch: keep only the named selectors, skip their dependency closure (setup nodes are still auto-included on remote platforms so the YAML doesn't reference dropped dependencies).
+- `ci run [--tui] [--mcp] [--host PLATFORM=ADDR ...] [--root RECIPE] [--no-deps] [RECIPE[@PLATFORM]...] [-- <args>]` (default): drive the pipeline; anything after `--` is forwarded verbatim to `process-compose up`. `--tui` swaps process-compose's headless logger for its interactive tcell view — useful for poking at long-running pipelines locally. `--mcp` expose process-compose's built-in MCP server over stdio so an agent client can introspect and control the in-flight pipeline (the TUI is auto-disabled in this mode). `--host PLATFORM=ADDR` is repeatable and overlays onto `~/.config/ci/hosts.json` (see _Remote builds over SSH_ above). `--root` replaces the DAG root that `[metadata("ci")]` would have picked; positional `RECIPE[@PLATFORM]` selectors restrict the run to those nodes and their transitive dependencies (e.g. `ci run e2e@x86_64-linux` re-runs just that one node after a flaky `e2e` lane). The status context (`<recipe>@<platform>`) is unchanged, so a partial re-run overwrites the same GitHub check the full run wrote. `--no-deps` is the `just`-style escape hatch: keep only the named selectors, skip their dependency closure (setup nodes are still auto-included on remote platforms so the YAML doesn't reference dropped dependencies).
 - `ci dump-yaml`: emit the assembled YAML to stdout for inspection. Runs in a side-effect-free mode — no host prompts, no `git rev-parse` shell-out — so it works offline, on a remote VM with no TTY, and outside a git checkout. Unresolved hosts render as `<unconfigured>` and the SSH `checkout` carries a `0000000-dump-yaml-placeholder` token; the YAML's *structure* (process keys, depends_on edges) still reflects the real fanout.
 - `ci protect [--branch BRANCH] [--dry-run]`: PATCH GitHub branch protection's `required_status_checks` to the `(recipe, platform)` contexts the canonical DAG produces. One-shot — runs the same DumpRun-mode pipeline build `dump-yaml`/`graph` use, filters to user-facing nodes (recipes only; setup nodes never post statuses), and sends the list to GitHub. `--branch` defaults to the repo's default branch (queried via `gh repo view`); `--dry-run` prints what would be PATCHed and exits. Setup the protection ruleset once in the GH UI; `ci protect` keeps the required-check list in sync with the DAG every time the recipe set changes. The DAG root stays the canonical `[metadata("ci")]` recipe — partial-run flags like `--root`/`--no-deps` belong on `run`, not on the required-check source of truth.
 
+## Use as an MCP server from another project
+
+`ci` is an [APM](https://microsoft.github.io/apm/) package that re-exports process-compose's MCP server (read-only introspection + start/stop/restart over running processes). Add a single line to your project's [`apm.yml`](https://microsoft.github.io/apm/reference/manifest-schema/) and `apm install` wires the MCP entry into every supported harness's runtime config (Claude Code, Codex, OpenCode, …):
+
+```yaml
+dependencies:
+  apm:
+    - juspay/ci
+```
+
+The launcher (`.agents/skills/ci/bin/serve`) is shipped as an APM skill primitive so the consumer's working tree has the bootable script before `apm install` runs on a fresh clone. It just `exec`s `nix run github:juspay/ci -- run --mcp` in the consumer's cwd, so the project needs a `justfile` with at least one recipe tagged `[metadata("ci")]`. Override knobs (env vars):
+
+| Var | Default | Effect |
+|---|---|---|
+| `CI_FLAKE` | `github:juspay/ci` | flake-ref the launcher resolves. Set to `path:/abs/path/to/local/ci` for development. |
+| `CI` | unset | When `true`, drives strict mode (clean-tree refuse, `git worktree` snapshot of HEAD, commit-status posts). Default is local mode. |
+
 ## Roadmap
 
-- Expose process-compose's state and control surface as an [MCP](https://modelcontextprotocol.io/) server so agent CLIs can introspect mid-run.
 - Per-recipe OS-attribute filtering: today a recipe is replicated to every pipeline platform regardless of its own `[linux]/[macos]` attribute (and the remote `just` refuses if the recipe isn't enabled on that host). A future pass at our layer would prune those nodes upfront so the verdict surface doesn't show them as `Failed`.

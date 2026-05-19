@@ -1,9 +1,26 @@
 name: ci
 version: 1.0.0
+description: ci runner MCP — exposes a `just`-recipe-driven pipeline's introspection and control surface to MCP clients via process-compose's built-in MCP server.
 type: hybrid
 
 target: claude
 
+# Canonical MCP server entry for this package. APM aggregates this into
+# downstream consumers' runtime configs via MCPIntegrator.collect_transitive
+# (apm-cli src/apm_cli/integration/mcp_integrator.py:65) — depth-1 direct
+# deps auto-trust self-defined servers. Consumers gain `ci` as an MCP
+# server by listing `juspay/ci` under their own `dependencies.apm`.
 dependencies:
   apm:
     - srid/agency#master
+  mcp:
+    - name: ci
+      registry: false
+      transport: stdio
+      # `.agents/skills/<name>/` is APM's converged cross-tool skill deploy
+      # path. The launcher is shipped as a skill primitive so the file is
+      # deployed to (and tracked in) the consumer's working tree, which keeps
+      # the MCP server bootable even before `apm install` runs on a fresh
+      # clone (apm_modules/ is conventionally git-ignored).
+      # https://microsoft.github.io/apm/reference/targets-matrix/#skills-convergence
+      command: .agents/skills/ci/bin/serve
