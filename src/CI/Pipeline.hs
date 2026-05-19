@@ -44,7 +44,7 @@ import qualified CI.Justfile as J
 import CI.LogPath (logDirFor, logPathFor, platformDir)
 import CI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
 import CI.Platform (Platform, localPlatform)
-import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, stdioMcp, toProcessCompose, withMcpServer)
+import CI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
 import CI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import CI.Root (findRoot)
 import CI.Transport (sshRecipeCommand, sshSetupCommand)
@@ -109,7 +109,7 @@ ensureRunDir = do
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  pc <- attachMcp opts <$> (dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun)
+  pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
@@ -151,7 +151,7 @@ runStrict opts passthrough dirs = do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    pc <- attachMcp opts <$> (dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir))
+    pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     seedPending repo sha logDir nodes
@@ -255,16 +255,6 @@ createPlatformDirs logDir nodes =
 -- parse/filter responsibility — this is the gate, not a bare iteration.
 withParsedNode :: ProcessState -> (NodeId -> IO ()) -> IO ()
 withParsedNode ps action = for_ (parseNodeId ps.name) action
-
--- | Overlay 'CI.ProcessCompose.stdioMcp' onto the assembled YAML when
--- @ci run --mcp@ is set; otherwise leave the @mcp_server@ field
--- unset. Stdio is the only transport the CLI surfaces today —
--- 'CI.ProcessCompose.Sse' is named in the wire vocabulary but not
--- wired to a flag (no need until something asks for it).
-attachMcp :: RunOpts -> ProcessCompose -> ProcessCompose
-attachMcp opts pc
-  | opts.mcp = withMcpServer stdioMcp pc
-  | otherwise = pc
 
 -- | Bracket @body@ between a 'subscribeStates' subscription on @sock@
 -- and a clean @wait@ on it: spawn the observer, 'link' so its crash
