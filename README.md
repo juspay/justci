@@ -67,7 +67,7 @@ Every emitted process is `restart: no` and `exit_on_skipped: false`, so one fail
 
 ## Consume `justci` as an [APM](https://microsoft.github.io/apm/) package
 
-This repo ships a `/justci` reference skill — a cheat-sheet for which subcommand to invoke (full pipeline, single recipe, platform-pinned re-run, `dump-yaml`/`graph`/`protect`, `hosts.json` overrides). Downstream projects pick it up by adding one line to their own [`apm.yml`](https://microsoft.github.io/apm/reference/manifest-schema/):
+This repo ships a `/ci` reference skill — a cheat-sheet for which subcommand to invoke (full pipeline, single recipe, platform-pinned re-run, `dump-yaml`/`graph`/`protect`, `hosts.json` overrides). Downstream projects pick it up by adding one line to their own [`apm.yml`](https://microsoft.github.io/apm/reference/manifest-schema/):
 
 ```yaml
 dependencies:
@@ -75,7 +75,7 @@ dependencies:
     - juspay/justci
 ```
 
-`apm install` lands the skill at `.claude/skills/justci/SKILL.md` (or the equivalent path for the consumer's harness). When the consumer's agent reaches a "run justci" / "re-run a flaky check" task, the skill triggers and dispatches the right `justci ...` invocation against the consumer's checkout.
+`apm install` lands the skill at `.claude/skills/ci/SKILL.md` (or the equivalent path for the consumer's harness). When the consumer's agent reaches a "run justci" / "re-run a flaky check" task, the skill triggers and dispatches the right `justci ...` invocation against the consumer's checkout.
 
 The skill is just documentation — it doesn't ship the runner itself. The consumer's project gets `justci` from this flake (`nix run github:juspay/justci -- run`) or a pinned version in its own `flake.nix`.
 
