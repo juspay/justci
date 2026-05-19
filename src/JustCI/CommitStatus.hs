@@ -209,7 +209,7 @@ seedDescription logPath = "Queued: " <> T.pack logPath
 -- | Compact human-readable rendering of a 'NominalDiffTime': @\<n\>s@
 -- under a minute, @\<n\>m\<n\>s@ under an hour, @\<n\>h\<n\>m@ otherwise.
 -- Sub-second durations round down to @0s@. The format is fixed-width-ish
--- (≤ 6 chars typical) so the @(\<elapsed\>)@ annotation in 'describe' fits
+-- (≤ 6 chars typical) so the @(\<elapsed\>)@ annotation in 'describePost' fits
 -- comfortably inside GitHub's 140-char description budget alongside the
 -- state label and log path.
 formatElapsed :: NominalDiffTime -> Text
