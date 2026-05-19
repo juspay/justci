@@ -1,4 +1,4 @@
-mod ci 'ci.just'
+mod ci 'justci.just'
 
 # List all recipes.
 default:

@@ -9,7 +9,7 @@
       eachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
 
       # Drv paths of `just` for every Nix system the runner can target.
-      # Baked into the Haskell binary at TH-splice time (see CI.Nix);
+      # Baked into the Haskell binary at TH-splice time (see JustCI.Nix);
       # the runner ships these tiny .drv files to remotes, which then
       # `nix-store --realise` to get a natively-built `just` binary.
       #
@@ -20,9 +20,9 @@
       # way to fetch from the wrong host.
       drvStr = drv: builtins.unsafeDiscardStringContext drv;
       justDrvEnv = {
-        CI_JUST_DRV_X86_64_LINUX   = drvStr nixpkgs.legacyPackages.x86_64-linux.just.drvPath;
-        CI_JUST_DRV_AARCH64_LINUX  = drvStr nixpkgs.legacyPackages.aarch64-linux.just.drvPath;
-        CI_JUST_DRV_AARCH64_DARWIN = drvStr nixpkgs.legacyPackages.aarch64-darwin.just.drvPath;
+        JUSTCI_JUST_DRV_X86_64_LINUX   = drvStr nixpkgs.legacyPackages.x86_64-linux.just.drvPath;
+        JUSTCI_JUST_DRV_AARCH64_LINUX  = drvStr nixpkgs.legacyPackages.aarch64-linux.just.drvPath;
+        JUSTCI_JUST_DRV_AARCH64_DARWIN = drvStr nixpkgs.legacyPackages.aarch64-darwin.just.drvPath;
       };
 
       perSystem = system:
@@ -33,7 +33,7 @@
             modules = [{
               # Package build: env vars land in the derivation so TH
               # picks them up during cabal compilation.
-              settings.ci = {
+              settings.justci = {
                 extraBuildTools = [ pkgs.just pkgs.process-compose pkgs.gh pkgs.git ];
                 custom = drv: drv.overrideAttrs (_: justDrvEnv);
               };
@@ -50,7 +50,7 @@
           };
         in
         {
-          packages.default = project.packages.ci.package;
+          packages.default = project.packages.justci.package;
           devShells.default = project.devShell;
         };
 
