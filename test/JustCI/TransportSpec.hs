@@ -3,7 +3,7 @@
 -- | Tests for "JustCI.Transport"'s SSH command builders and runner prefix.
 -- 'JustCI.Justfile.recipeCommand' covers local recipe commands (no SSH plumbing).
 -- The end-to-end bundle+clone+run path is exercised by the
--- @justci::run-check@ smoke test in @justci.just@; this spec locks down the
+-- @ci::run-check@ smoke test in @justci.just@; this spec locks down the
 -- structural choices in isolation.
 module JustCI.TransportSpec (spec) where
 

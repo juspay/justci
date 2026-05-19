@@ -34,9 +34,9 @@ flake-check:
 fmt-check:
     nix develop -c fourmolu --mode check $(find src test app -name '*.hs')
 
-# Smoke-test the dump-yaml subcommand. The pipeline root is `justci::default`,
+# Smoke-test the dump-yaml subcommand. The pipeline root is `ci::default`,
 # tagged [linux] [macos] [metadata("ci")] — so the fanout produces both
-# lanes and every process key is `justci::<name>@<platform>`. Each platform's
+# lanes and every process key is `ci::<name>@<platform>`. Each platform's
 # smoke verifies its own lane is present plus the structural invariants
 # (--no-deps, restart: no, exit_on_skipped: false) for cross-lane failure
 # tolerance. `dump-yaml` runs in `DumpRun` mode so it never prompts for
@@ -49,7 +49,7 @@ run-check: build
     # Only assert the current platform's lane is present — each remote
     # has its own hosts.json and may not list the other platform, so a
     # cross-platform grep would fail on the remote's local dump.
-    grep -qE '^  justci::default@x86_64-linux:' /tmp/justci-out
+    grep -qE '^  ci::default@x86_64-linux:' /tmp/justci-out
     grep -qE -- '--no-deps' /tmp/justci-out
     grep -qE "^      restart: 'no'$" /tmp/justci-out
     grep -qE '^      exit_on_skipped: false$' /tmp/justci-out
@@ -58,7 +58,7 @@ run-check: build
 run-check: build
     echo "Running on macOS $(sw_vers -productVersion)"
     nix run . -- dump-yaml | tee "${TMPDIR%/}/justci-out"
-    grep -qE '^  justci::default@aarch64-darwin:' "${TMPDIR%/}/justci-out"
+    grep -qE '^  ci::default@aarch64-darwin:' "${TMPDIR%/}/justci-out"
     grep -qE -- '--no-deps' "${TMPDIR%/}/justci-out"
     grep -qE "^      restart: 'no'$" "${TMPDIR%/}/justci-out"
     grep -qE '^      exit_on_skipped: false$' "${TMPDIR%/}/justci-out"
