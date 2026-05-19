@@ -10,6 +10,7 @@
 module CI.Git
   ( -- * Values
     Sha,
+    shaPlaceholder,
 
     -- * Operations
     CleanTreeError,
@@ -40,6 +41,13 @@ gitBin = $(staticWhich "git")
 newtype Sha = Sha Text
   deriving stock (Show, Eq)
   deriving newtype (Display)
+
+-- | A visibly-fake 'Sha' used by 'CI.Pipeline' in dump-yaml mode to fill
+-- the SSH command shape when there's no real SHA to clone. Never
+-- written to GitHub, never read back: the rendered form just stands out
+-- in the inspected YAML.
+shaPlaceholder :: Sha
+shaPlaceholder = Sha "0000000-dump-yaml-placeholder"
 
 -- | The two ways 'ensureCleanTree' can fail. Subprocess failures wrap
 -- 'SubprocessError' so the @binary failed (N): stderr@ formatting lives

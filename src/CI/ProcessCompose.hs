@@ -16,6 +16,7 @@ module CI.ProcessCompose
     ProcessCompose,
     toProcessCompose,
     processNames,
+    processGraph,
 
     -- * Invocation
     UpInvocation (..),
@@ -24,7 +25,7 @@ module CI.ProcessCompose
 where
 
 import qualified Algebra.Graph.AdjacencyMap as G
-import CI.Justfile (RecipeName)
+import CI.Node (NodeId (..))
 import Data.Aeson (ToJSON (..), camelTo2, defaultOptions, genericToJSON)
 import Data.Aeson.Types (Options (..))
 import qualified Data.ByteString as BS
@@ -32,9 +33,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Yaml as Y
 import GHC.Generics (Generic)
-import System.Exit (ExitCode, die)
-import System.IO (hClose)
-import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
+import System.Exit (ExitCode)
+import System.Process (proc, waitForProcess, withCreateProcess)
 import System.Which (staticWhich)
 
 -- | Absolute path to the @process-compose@ binary, baked in at compile time
@@ -56,25 +56,37 @@ snakeCaseTag =
     }
 
 -- | Top-level @process-compose.yaml@: a map from process name to spec.
-newtype ProcessCompose = ProcessCompose {processes :: Map.Map RecipeName Process}
+newtype ProcessCompose = ProcessCompose {processes :: Map.Map NodeId Process}
   deriving stock (Generic)
   deriving anyclass (ToJSON)
 
 -- | One @processes.<name>@ entry. Field names match @process-compose@'s YAML keys.
 data Process = Process
   { command :: Text,
-    depends_on :: Map.Map RecipeName Dependency,
+    -- | Which group this process belongs to in pc's typed
+    --     @namespace@ vocabulary. Either @"setup"@ (internal
+    --     plumbing — bundle ship, drv copy) or @"recipes"@ (user
+    --     work). The kind is derived structurally from the 'NodeId'
+    --     sum at emission time, so the namespace label and the
+    --     'NodeId' constructor agree by construction. The label is
+    --     the pc-side seam that replaces the historical
+    --     name-prefix sniff (@_ci-setup@) for the setup/recipe
+    --     distinction at the wire layer.
+    namespace :: Text,
+    depends_on :: Map.Map NodeId Dependency,
     availability :: Availability,
-    -- | When set, process-compose @chdir@s the spawned recipe into this
-    -- directory before executing 'command'. Used in strict mode to pin
-    -- every recipe to an immutable @git worktree@ snapshot of HEAD.
-    -- 'Nothing' omits the field from the YAML so dev runs are unchanged.
+    -- | When set, process-compose @chdir@s the spawned process into this
+    --     directory before executing 'command'. Used in strict mode to pin
+    --     every local recipe to an immutable @git worktree@ snapshot of
+    --     HEAD. 'Nothing' omits the field from the YAML — both for dev runs
+    --     (which run against the live tree) and for setup-node processes
+    --     (which are @ssh -T ...@ launchers whose local cwd is ignored).
     working_dir :: Maybe FilePath,
     -- | When set, process-compose routes this process's stdout/stderr to
-    -- the given file instead of the global @-L@ log. Used in strict mode
-    -- to split per-recipe output into @.ci\/\<sha\>\/\<recipe\>.log@ so
-    -- the GitHub commit status can embed a navigable path to the failing
-    -- log. 'Nothing' falls back to the global log.
+    --     the given file instead of the global @-L@ log. Used in strict mode
+    --     to split per-recipe output into @.ci\/\<sha\>\/\<recipe\>.log@ so
+    --     the GitHub commit status can embed a navigable path to the failing
+    --     log. 'Nothing' falls back to the global log.
     log_location :: Maybe FilePath
   }
   deriving stock (Generic)
@@ -128,73 +140,107 @@ data RestartPolicy = No | ExitOnFailure
 instance ToJSON RestartPolicy where
   toJSON = genericToJSON snakeCaseTag
 
--- | Assemble a @process-compose@ config from a pre-validated execution graph.
--- The caller supplies @mkCommand@ (the shell command emitted for each
--- vertex), @mkLogLocation@ (the per-process log path, or 'Nothing' to fall
--- back to the global log), and @workingDir@ (the directory every recipe
--- is @chdir@'d into, or 'Nothing' to leave it unset). Each outgoing edge
--- becomes a @depends_on@ entry. Keeping these policy decisions out of
--- this module lets callers vary how vertices are invoked, where they
--- execute, and where their output lands without the YAML emitter knowing
--- about any of those choices.
+-- | Assemble a @process-compose@ config from a pre-validated execution
+-- graph. The caller supplies three per-vertex callbacks:
+--
+--   * @mkCommand@ — the shell command emitted for each vertex.
+--   * @mkWorkingDir@ — the directory the process is @chdir@'d into,
+--     or 'Nothing' to leave it unset. Per-node (not uniform) so
+--     e.g. SSH-launcher processes can opt out of the local worktree
+--     pin (their cwd is ignored once the @ssh@ tokens take over).
+--   * @mkLogLocation@ — the per-process log path, or 'Nothing' to
+--     fall back to the global log.
+--
+-- Each outgoing edge becomes a @depends_on@ entry. Keeping these
+-- policy decisions out of this module lets callers vary how
+-- vertices are invoked, where they execute, and where their output
+-- lands without the YAML emitter knowing about any of those choices.
 toProcessCompose ::
-  Maybe FilePath ->
-  (RecipeName -> Text) ->
-  (RecipeName -> Maybe FilePath) ->
-  G.AdjacencyMap RecipeName ->
+  (NodeId -> Text) ->
+  (NodeId -> Maybe FilePath) ->
+  (NodeId -> Maybe FilePath) ->
+  G.AdjacencyMap NodeId ->
   ProcessCompose
-toProcessCompose workingDir mkCommand mkLogLocation g =
+toProcessCompose mkCommand mkWorkingDir mkLogLocation g =
   ProcessCompose $ Map.fromSet mkProcess (G.vertexSet g)
   where
-    mkProcess recipe =
+    mkProcess node =
       Process
-        { command = mkCommand recipe,
-          depends_on = Map.fromSet (const (Dependency ProcessCompletedSuccessfully)) (G.postSet recipe g),
+        { command = mkCommand node,
+          namespace = namespaceFor node,
+          depends_on = Map.fromSet (const (Dependency ProcessCompletedSuccessfully)) (G.postSet node g),
           availability = Availability {restart = No, exit_on_skipped = False},
-          working_dir = workingDir,
-          log_location = mkLogLocation recipe
+          working_dir = mkWorkingDir node,
+          log_location = mkLogLocation node
         }
 
--- | The set of recipe names in a 'ProcessCompose'. Returned in 'Map' key
--- order so iteration is stable. Useful for pre-seeding per-recipe state
--- at startup (e.g. posting @pending@ commit statuses for every recipe
--- before process-compose has begun scheduling them).
-processNames :: ProcessCompose -> [RecipeName]
+-- | The pc namespace label for a 'NodeId'. Derived structurally from
+-- the closed sum so the label and the constructor can never disagree.
+-- Unexported — used only inside 'toProcessCompose'.
+namespaceFor :: NodeId -> Text
+namespaceFor (SetupNode _) = "setup"
+namespaceFor (RecipeNode _ _) = "recipes"
+
+-- | The set of node identities in a 'ProcessCompose'. Returned in
+-- 'Map' key order so iteration is stable. Useful for pre-seeding
+-- per-node state at startup (e.g. posting @pending@ commit statuses
+-- for every @(recipe, platform)@ before process-compose has begun
+-- scheduling them).
+processNames :: ProcessCompose -> [NodeId]
 processNames (ProcessCompose ps) = Map.keys ps
 
 -- | All inputs that shape a @process-compose up@ invocation. The YAML
--- config itself goes on stdin separately (it's typically too big for an
--- argv); everything else flag-shaped lives here. Process-compose always
--- binds its API to a UDS at @sockPath@ — that's both the
--- 'CI.ProcessCompose.Events.subscribeStates' attachment point and the
--- de-facto mutex for "is a ci run in progress in this checkout."
+-- config is materialised to @yamlPath@ before the spawn (rather than
+-- piped through stdin) so process-compose's TUI mode — which needs the
+-- parent's tty on stdin for keyboard input — works as a drop-in toggle.
+-- Process-compose always binds its API to a UDS at @sockPath@ — that's
+-- both the 'CI.ProcessCompose.Events.subscribeStates' attachment point
+-- and the de-facto mutex for "is a ci run in progress in this checkout."
 data UpInvocation = UpInvocation
   { sockPath :: FilePath,
     logFile :: FilePath,
+    -- | Where to write the YAML before spawning pc. Passed via @-f@.
+    yamlPath :: FilePath,
+    -- | Drive process-compose's TUI (@-t=true@) instead of headless
+    --     (@-t=false@). Only meaningful in 'CI.Pipeline.runLocal'; CI
+    --     mode normally wants headless, but the flag itself is mode-
+    --     agnostic at this layer.
+    tui :: Bool,
     -- | Caller-supplied args appended verbatim after the canned
-    -- baseline; the @ci run -- ...@ passthrough lands here.
+    --     baseline; the @ci run -- ...@ passthrough lands here.
     passthroughArgs :: [String]
   }
 
 -- | Translate an 'UpInvocation' into the argv vector for @process-compose@.
--- The YAML config is read from stdin (@-f /dev/stdin@) so it's not part of
--- the args. TUI is disabled (@-t=false@) unconditionally — there is only
--- one caller ('runProcessCompose') and it never wants TUI.
+-- The YAML config is read from @yamlPath@ via @-f@. @-t=true@ enables the
+-- TUI, @-t=false@ keeps it headless; the flag is always emitted explicitly
+-- so the chosen mode is visible at the call site.
 toUpArgs :: UpInvocation -> [String]
 toUpArgs up =
-  ["up", "-f", "/dev/stdin", "-t=false", "-L", up.logFile, "-U", "-u", up.sockPath] <> up.passthroughArgs
-
--- | Spawn @process-compose up@ from the 'UpInvocation', encode the
--- 'ProcessCompose' as YAML on stdin, and forward the subprocess's exit
--- code. 'withCreateProcess' brackets the spawn so stdin is closed and the
--- child reaped even if 'BS.hPut' throws (e.g. broken pipe).
-runProcessCompose :: UpInvocation -> ProcessCompose -> IO ExitCode
-runProcessCompose up pc =
-  withCreateProcess cp $ \mhin _ _ ph -> case mhin of
-    Nothing -> die "process-compose: stdin pipe was not created"
-    Just hin -> do
-      BS.hPut hin (Y.encode pc)
-      hClose hin
-      waitForProcess ph
+  ["up", "-f", up.yamlPath, tFlag, "-L", up.logFile, "-U", "-u", up.sockPath] <> up.passthroughArgs
   where
-    cp = (proc processComposeBin (toUpArgs up)) {std_in = CreatePipe}
+    tFlag = if up.tui then "-t=true" else "-t=false"
+
+-- | Spawn @process-compose up@ from the 'UpInvocation'. The YAML is
+-- materialised at 'yamlPath' first (overwriting any prior content); the
+-- subprocess then reads it via @-f@. Stdin/stdout/stderr inherit from
+-- the parent so TUI mode (when enabled) has the user's tty for input
+-- and headless mode still shows pc's own progress lines.
+runProcessCompose :: UpInvocation -> ProcessCompose -> IO ExitCode
+runProcessCompose up pc = do
+  BS.writeFile up.yamlPath (Y.encode pc)
+  withCreateProcess cp $ \_ _ _ ph -> waitForProcess ph
+  where
+    cp = proc processComposeBin (toUpArgs up)
+
+-- | Recover the dependency graph from an assembled 'ProcessCompose'.
+-- Useful for renderers that want the typed adjacency map back ('CI.Pipeline.runGraph'
+-- emits mermaid syntax from it) — pc's own @graph@ subcommand is
+-- server-only (it hits a running pc's HTTP API rather than reading
+-- a YAML file), so re-deriving the structure here is the path
+-- that works without a live run.
+processGraph :: ProcessCompose -> G.AdjacencyMap NodeId
+processGraph (ProcessCompose ps) =
+  G.vertices (Map.keys ps)
+    `G.overlay` G.edges
+      [(name, dep) | (name, p) <- Map.toList ps, dep <- Map.keys p.depends_on]

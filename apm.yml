@@ -1,5 +1,6 @@
 name: ci
 version: 1.0.0
+description: ci runner — translates a `just`-recipe graph into a process-compose pipeline with multi-platform SSH fanout. The shipped `ci` skill is a `/ci` reference for downstream agents that need to drive the runner from a project that depends on this package.
 type: hybrid
 
 target: claude

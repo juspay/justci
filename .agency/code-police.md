@@ -74,6 +74,43 @@ _Anti-patterns_:
 - Listing exports: `-- | Exports foo, bar, baz.`
 - Narrating the diff: `-- | Added in PR #2 for the just-graph feature.`
 
+## organize-exports
+
+Every export list is structured, not flat. Organize it the way a reader would scan it: public API at the top in concern-grouped sections; below a visible divider, the symbols exposed only for tests or for closely-coupled sibling modules. The list is the module's table of contents — the order and the grouping carry meaning.
+
+The minimal shape:
+
+```haskell
+module CI.Foo (
+    -- * Values
+    Foo,
+    fooFromText,
+
+    -- * Operations
+    doFoo,
+
+    -- * === Internal (exposed for tests) ===
+    fooInternalAccessor,
+) where
+```
+
+This complements `document-symbols` (which mandates per-symbol Haddocks and group headings on multi-concern lists) by adding a fixed *order* and a *visible divider* between public and internal.
+
+_How to apply_:
+
+- Put **public exports first**, grouped under `-- * <Concern>` Haddock headings. "Public" means imported by any module other than `*Spec.hs` test files.
+- Below them, place a single divider heading whose label flags the section as non-public — `-- * === Internal ===`, `-- * === Internal (test surface) ===`, or similar. The `===` (or any equivalent visual marker) is what makes the boundary scannable in a diff or a hover preview.
+- Every internal export carries a one-line Haddock explaining *why* it's exposed (which test or sibling needs it). Internal isn't a slush bucket — each entry is justified.
+- A module with no internal exports omits the divider entirely.
+- A module whose export list is short enough to fit on a few lines without distinct concerns can skip the section headings — but if a divider is needed (any internal exports at all), the public side still gets at least one heading so the divider has something to be "below."
+
+_Anti-patterns_:
+
+- A flat export list mixing public types, operations, and test-only helpers in declaration order.
+- An "internal" symbol exposed at the top of the list because that's where its definition happens to live in the source.
+- An empty `-- * === Internal ===` divider left behind after the last test-only helper was inlined. If the section's empty, delete the heading.
+- A divider with no visual marker — just `-- * Internal` reads like another concern group, not a boundary.
+
 ## no-partial-functions
 
 Don't reach for functions that can crash on a value of the correct type — `head`, `tail`, `init`, `last`, `fromJust`, `(!!)`, `read`, `Map.!`, `error`, `undefined` — when a total alternative exists. Non-exhaustive pattern matches fall under the same rule: every `case` covers every constructor (use `_` deliberately if you mean "I don't care").

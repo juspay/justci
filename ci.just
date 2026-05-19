@@ -1,4 +1,17 @@
-# Run all checks (build + flake check) concurrently, then smoke-test the binary.
+# Run all checks (build + flake check) concurrently with the binary smoke
+# test, since run-check only depends on build (not flake-check). The
+# [linux] [macos] attributes fan the pipeline out across both lanes: every
+# reachable recipe gets a (recipe, platform) node, the local lane runs
+# against the worktree, and the macos lane SSHs to whatever
+# `~/.config/ci/hosts.json` maps `macos` to.
+#
+# [parallel] on `default` is what lets run-check start as soon as build
+# finishes, in parallel with flake-check. Without it, the runner would
+# chain run-check behind checks (and therefore behind flake-check too)
+# even though run-check has no flake-check dependency.
+[linux]
+[macos]
+[parallel]
 [metadata("ci")]
 default: checks run-check
 
@@ -21,20 +34,23 @@ flake-check:
 fmt-check:
     nix develop -c fourmolu --mode check $(find src test app -name '*.hs')
 
-# Smoke-test the dump-yaml subcommand: the pipeline root is `ci::default`
-# (this module's default recipe, tagged [metadata("ci")]) so every process
-# in the YAML is a fully-qualified `ci::<name>` — proving submodule
-# discovery is wired through.
+# Smoke-test the dump-yaml subcommand. The pipeline root is `ci::default`,
+# tagged [linux] [macos] [metadata("ci")] — so the fanout produces both
+# lanes and every process key is `ci::<name>@<platform>`. Each platform's
+# smoke verifies its own lane is present plus the structural invariants
+# (--no-deps, restart: no, exit_on_skipped: false) for cross-lane failure
+# tolerance. `dump-yaml` runs in `DumpRun` mode so it never prompts for
+# hosts and never shells out to git — safe to invoke on the macos remote
+# even when `~/.config/ci/hosts.json` there has no linux entry.
 [linux]
 run-check: build
     echo "Running on Linux $(uname -srm)"
     nix run . -- dump-yaml | tee /tmp/ci-out
-    grep -qE '^  ci::default:' /tmp/ci-out
+    # Only assert the current platform's lane is present — each remote
+    # has its own hosts.json and may not list the other platform, so a
+    # cross-platform grep would fail on the remote's local dump.
+    grep -qE '^  ci::default@x86_64-linux:' /tmp/ci-out
     grep -qE -- '--no-deps' /tmp/ci-out
-    # Cross-lane failure tolerance: every process emits `restart: no` and
-    # `exit_on_skipped: false` so one failing recipe leaves siblings
-    # running. The verdict step derives the final exit code from the
-    # accumulated outcomes, not pc's own exit.
     grep -qE "^      restart: 'no'$" /tmp/ci-out
     grep -qE '^      exit_on_skipped: false$' /tmp/ci-out
 
@@ -42,7 +58,7 @@ run-check: build
 run-check: build
     echo "Running on macOS $(sw_vers -productVersion)"
     nix run . -- dump-yaml | tee "${TMPDIR%/}/ci-out"
-    grep -qE '^  ci::default:' "${TMPDIR%/}/ci-out"
+    grep -qE '^  ci::default@aarch64-darwin:' "${TMPDIR%/}/ci-out"
     grep -qE -- '--no-deps' "${TMPDIR%/}/ci-out"
     grep -qE "^      restart: 'no'$" "${TMPDIR%/}/ci-out"
     grep -qE '^      exit_on_skipped: false$' "${TMPDIR%/}/ci-out"

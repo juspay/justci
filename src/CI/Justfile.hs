@@ -18,6 +18,7 @@ module CI.Justfile
     Recipe (..),
     Dep (..),
     Attribute (..),
+    Os (..),
 
     -- * Operations
     FetchError,
@@ -46,7 +47,8 @@ import System.Which (staticWhich)
 
 -- | Absolute path to the @just@ binary, baked in at compile time via Nix.
 -- Not exported: every just shell-out in the project goes through one of
--- the typed operations below.
+-- the typed operations below ('recipeCommand', or 'CI.Nix.realisedJust'
+-- for remote lanes).
 justBin :: FilePath
 justBin = $(staticWhich "just")
 

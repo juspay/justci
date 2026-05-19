@@ -14,20 +14,28 @@ module CI.Gh
     Owner,
     RepoName,
     Repo,
+    BranchName,
     CommitStatus (..),
     Context,
     CommitStatusPost (..),
 
-    -- * Operations
+    -- * Errors
     GhError,
+
+    -- * Operations
     viewRepo,
+    viewDefaultBranch,
     contextFrom,
     postCommitStatus,
+    setRequiredChecks,
   )
 where
 
 import CI.Git (Sha)
 import CI.Subprocess (SubprocessError, runSubprocess)
+import qualified Data.Aeson as A
+import qualified Data.ByteString.Lazy.Char8 as BL
+import Data.String (IsString)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Display (Display (..), display)
@@ -57,16 +65,28 @@ newtype RepoName = RepoName Text
 data Repo = Repo {owner :: Owner, name :: RepoName}
   deriving stock (Show, Eq)
 
+-- | A GitHub branch name (e.g. @main@, @master@, @develop@). Opaque
+-- per @prefer-newtype-over-string@: minted either by 'viewDefaultBranch'
+-- (resolved from @gh repo view@) or via 'OverloadedStrings' literals
+-- ('IsString'). 'Display' is the canonical destructor — consumers
+-- never pattern-match the constructor.
+newtype BranchName = BranchName Text
+  deriving stock (Show, Eq)
+  deriving newtype (Display, IsString)
+
 -- | Failures from the gh operations in this module.
 data GhError
   = GhSubprocess SubprocessError
   | UnexpectedNameWithOwner String
+  | UnexpectedDefaultBranch String
   deriving stock (Show)
 
 instance Display GhError where
   displayBuilder (GhSubprocess e) = displayBuilder e
   displayBuilder (UnexpectedNameWithOwner out) =
     "unexpected nameWithOwner from gh: " <> displayBuilder (T.pack out)
+  displayBuilder (UnexpectedDefaultBranch out) =
+    "unexpected defaultBranchRef from gh: " <> displayBuilder (T.pack out)
 
 -- | Run @gh repo view --json nameWithOwner@ and split the result into a
 -- typed 'Repo' so callers never see a slash-separated string.
@@ -83,6 +103,25 @@ viewRepo = do
     Right out -> case T.splitOn "/" (T.strip (T.pack out)) of
       [o, n] | not (T.null o), not (T.null n) -> Right (Repo (Owner o) (RepoName n))
       _ -> Left (UnexpectedNameWithOwner out)
+
+-- | Resolve the repo's default branch name (e.g. @main@, @master@) via
+-- @gh repo view --json defaultBranchRef@. Used by "CI.Pipeline.runProtect"
+-- when the user hasn't passed an explicit @--branch@.
+viewDefaultBranch :: IO (Either GhError BranchName)
+viewDefaultBranch = do
+  result <-
+    runSubprocess
+      "gh repo view (defaultBranchRef)"
+      ghBin
+      ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]
+      ""
+  pure $ case result of
+    Left e -> Left (GhSubprocess e)
+    Right out ->
+      let b = T.strip (T.pack out)
+       in if T.null b
+            then Left (UnexpectedDefaultBranch out)
+            else Right (BranchName b)
 
 -- | The four GitHub-defined commit-status states. See
 -- <https://docs.github.com/en/rest/commits/statuses>. The 'Display'
@@ -144,3 +183,50 @@ apiPost endpoint fields = do
   where
     args = ["api", "-X", "POST", T.unpack endpoint] ++ concatMap formArg fields
     formArg (k, v) = ["-f", T.unpack k <> "=" <> T.unpack v]
+
+-- | Replace the required status checks on a branch's protection ruleset.
+-- PATCHes
+-- @\/repos\/{owner}\/{repo}\/branches\/{branch}\/protection\/required_status_checks@
+-- with @{"strict": false, "contexts": [...]}@.
+--
+-- @strict = false@ is deliberate: requiring branches to be up-to-date
+-- with base before merge is a separate decision (it interacts with
+-- mergeability and review semantics) that the repo owner can flip in
+-- the GH UI without re-running @ci protect@.
+--
+-- Requires the branch to already have protection enabled — the
+-- endpoint is a subresource of an existing protection ruleset, not a
+-- creator. If protection isn't enabled gh returns a 404 which surfaces
+-- through 'SubprocessError'; the user enables protection once via the
+-- GH UI, then re-runs @ci protect@.
+setRequiredChecks :: Repo -> BranchName -> [Context] -> IO (Either SubprocessError ())
+setRequiredChecks repo branch contexts = apiPatchJson endpoint body
+  where
+    endpoint =
+      "/repos/"
+        <> display repo.owner
+        <> "/"
+        <> display repo.name
+        <> "/branches/"
+        <> display branch
+        <> "/protection/required_status_checks"
+    body =
+      A.object
+        [ "strict" A..= False,
+          "contexts" A..= [display c | c <- contexts]
+        ]
+
+-- | Internal helper: @gh api -X PATCH \<endpoint\> --input -@ with a
+-- JSON body piped on stdin. The form-field shape ('apiPost') can't
+-- express GitHub's nested JSON requests (arrays of objects, mixed
+-- types); a literal JSON body is the simplest equivalent and lets
+-- aeson handle the encoding.
+apiPatchJson :: Text -> A.Value -> IO (Either SubprocessError ())
+apiPatchJson endpoint payload = do
+  result <-
+    runSubprocess
+      ("gh api PATCH " <> endpoint)
+      ghBin
+      ["api", "-X", "PATCH", T.unpack endpoint, "--input", "-"]
+      (BL.unpack (A.encode payload))
+  pure (() <$ result)

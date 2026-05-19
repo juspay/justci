@@ -9,17 +9,24 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  CI.CommitStatus
+    exposed-modules:  CI.CLI
+                      CI.CommitStatus
+                      CI.Fanout
                       CI.Gh
                       CI.Git
                       CI.Graph
+                      CI.Hosts
                       CI.Justfile
                       CI.LogPath
+                      CI.Nix
+                      CI.Node
                       CI.Pipeline
+                      CI.Platform
                       CI.ProcessCompose
                       CI.ProcessCompose.Events
                       CI.Root
                       CI.Subprocess
+                      CI.Transport
                       CI.Verdict
     build-depends:
         , aeson
@@ -31,7 +38,10 @@ library
         , directory
         , filepath
         , network
+        , optparse-applicative
         , process
+        , template-haskell
+        , th-env
         , text
         , text-display
         , time
@@ -46,10 +56,7 @@ executable ci
     main-is:          Main.hs
     build-depends:
         , base
-        , bytestring
         , ci
-        , optparse-applicative
-        , yaml
     hs-source-dirs:   app
     default-language: Haskell2010
 
@@ -57,8 +64,12 @@ test-suite ci-test
     import:           warnings
     type:             exitcode-stdio-1.0
     main-is:          Spec.hs
-    other-modules:    CI.JustfileSpec
+    other-modules:    CI.CommitStatusSpec
+                      CI.JustfileSpec
+                      CI.NodeSpec
+                      CI.PlatformSpec
                       CI.ProcessComposeSpec
+                      CI.TransportSpec
                       CI.VerdictSpec
     build-depends:
         , algebraic-graphs
