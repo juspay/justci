@@ -12,7 +12,7 @@ description: Reference for the `justci` runner — how to invoke a full pipeline
 | Variable | Effect |
 | --- | --- |
 | `CI` unset (default) | **Local mode.** Runs against the live working tree. No GitHub status posts, no clean-tree refuse. Use for iterating. |
-| `CI=true` | **Strict mode.** Refuses a dirty tree, snapshots `HEAD` via `git worktree`, posts commit statuses, splits per-recipe logs into `.justci/<sha>/<plat>/<recipe>.log`. Use for "real" CI runs. |
+| `CI=true` | **Strict mode.** Refuses a dirty tree, snapshots `HEAD` via `git worktree`, posts commit statuses, splits per-recipe logs into `.ci/<sha>/<plat>/<recipe>.log`. Use for "real" CI runs. |
 
 Both modes share the same verdict-summary at the end (`── justci run summary ──`) and exit non-zero if any node failed.
 

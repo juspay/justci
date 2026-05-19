@@ -5,7 +5,7 @@
 
 -- | Orchestration for the per-subcommand entry points
 -- ('runLocal', 'runStrict', 'runGraph', 'runDumpYaml', 'runProtect')
--- and the runtime artifact layout under @\$PWD\/.justci\/@. "Main" is the
+-- and the runtime artifact layout under @\$PWD\/.ci\/@. "Main" is the
 -- dispatch layer; everything mode-specific lives here. The pure graph
 -- shape change (recipe DAG → platform-fanned NodeId DAG, plus the
 -- user-selector filter) lives in "JustCI.Fanout"; this module composes
@@ -63,7 +63,7 @@ import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
 import System.Exit (die)
 import System.FilePath ((</>))
 
--- | The runtime artifact paths under @\$PWD\/.justci\/@. Built once at the top
+-- | The runtime artifact paths under @\$PWD\/.ci\/@. Built once at the top
 -- of a run so 'runLocal' and 'runStrict' both reference the same
 -- convention instead of hand-rolling @runDir \<\/\> "pc.log"@ at each
 -- call site.
@@ -74,13 +74,13 @@ data RunDir = RunDir
     pcYaml :: FilePath
   }
 
--- | Create @\$PWD\/.justci\/@ (if missing) and return the canonical sub-paths.
+-- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
 -- Everything we write at runtime lives here so the user gitignores
--- @\/.justci\/@ once and forgets about it.
+-- @\/.ci\/@ once and forgets about it.
 ensureRunDir :: IO RunDir
 ensureRunDir = do
   cwd <- getCurrentDirectory
-  let dir = cwd </> ".justci"
+  let dir = cwd </> ".ci"
   createDirectoryIfMissing True dir
   pure
     RunDir
@@ -94,8 +94,8 @@ ensureRunDir = do
 -- log routing. The observer still runs — its only consumer is the
 -- verdict accumulator, which gives developer runs the same end-of-run
 -- summary strict mode produces. Process-compose's log goes to
--- @.justci\/pc.log@ so even local runs don't leak into @\$TMPDIR@; the same
--- UDS at @.justci\/pc.sock@ is bound so the API surface is available for
+-- @.ci\/pc.log@ so even local runs don't leak into @\$TMPDIR@; the same
+-- UDS at @.ci\/pc.sock@ is bound so the API surface is available for
 -- future consumers (e.g. an MCP server).
 --
 -- SSH lanes are supported in local mode too: any non-local platform
@@ -118,17 +118,17 @@ runLocal opts passthrough dirs = do
   exitWithVerdict (hostFor hosts) outcomes
 
 -- | Strict mode: clean-tree refuse → resolve repo + SHA → snapshot HEAD
--- via @git worktree@ at @.justci\/worktree@ → start process-compose with its
--- API on @.justci\/pc.sock@ → subscribe to state events, post commit
+-- via @git worktree@ at @.ci\/worktree@ → start process-compose with its
+-- API on @.ci\/pc.sock@ → subscribe to state events, post commit
 -- statuses, and accumulate the per-node outcome map concurrently with
 -- the pipeline run.
 --
 -- Per-node stdout/stderr is split into
--- @.justci\/\<sha\>\/\<platform\>\/\<recipe\>.log@ (created here before
+-- @.ci\/\<sha\>\/\<platform\>\/\<recipe\>.log@ (created here before
 -- process-compose spawns) so each GitHub commit status can carry a
 -- navigable path to the matching log. The SHA-keyed directory keeps
 -- history across runs: a green-then-red sequence on the same checkout
--- leaves both runs' logs side-by-side under @.justci\/@.
+-- leaves both runs' logs side-by-side under @.ci\/@.
 --
 -- The two consumers of the state stream — 'postStatusFor' (GitHub
 -- write) and 'recordOutcome' (local accumulator) — are composed at
@@ -177,7 +177,7 @@ runStrict opts passthrough dirs = do
 -- through @mermaid-ascii@ (or paste into <https://mermaid.live>) to
 -- visualise.
 --
--- Read-only: 'justci graph' must not create @.justci\/@ as a side effect.
+-- Read-only: 'justci graph' must not create @.ci\/@ as a side effect.
 -- That's why this takes no 'RunDir' — only 'runLocal' and
 -- 'runStrict' need the runtime-artifact paths.
 runGraph :: IO ()
@@ -237,7 +237,7 @@ runProtect opts = do
       dieOnLeft =<< setRequiredChecks repo branch contexts
       TIO.putStrLn $ "updated required_status_checks on " <> display branch <> " (" <> nCtx <> " contexts)"
 
--- | Materialise every @.justci\/\<sha\>\/\<platform\>\/@ subdirectory the
+-- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
 -- creates the per-recipe log *file* itself but won't create
 -- intermediate directories — without this the first event for a
@@ -274,7 +274,7 @@ withObserver sockP onState body =
 -- shape: no worktree pin, no per-recipe log routing. 'StrictRun'
 -- carries the two paths that always travel together — the @git
 -- worktree@ snapshot every local recipe @chdir@s into, and the
--- @.justci\/\<sha\>\/@ log directory the YAML emitter routes each
+-- @.ci\/\<sha\>\/@ log directory the YAML emitter routes each
 -- process's stdout/stderr to. A sum type instead of two parallel
 -- @Maybe FilePath@s rules out the mixed @(Just, Nothing)@ /
 -- @(Nothing, Just)@ states that produce logically inconsistent YAML.

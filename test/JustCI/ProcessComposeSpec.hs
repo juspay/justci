@@ -18,8 +18,8 @@ import Test.Hspec
 spec :: Spec
 spec = describe "toProcessCompose" $ do
   it "emits log_location when the per-node lookup returns Just" $ do
-    let yaml = encodeYaml (const (Just ".justci/abc/linux/r.log"))
-    yaml `shouldContain` "log_location: .justci/abc/linux/r.log"
+    let yaml = encodeYaml (const (Just ".ci/abc/linux/r.log"))
+    yaml `shouldContain` "log_location: .ci/abc/linux/r.log"
 
   it "omits log_location when the per-node lookup returns Nothing" $ do
     let yaml = encodeYaml (const Nothing)

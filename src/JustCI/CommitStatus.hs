@@ -160,7 +160,7 @@ contextForNode = contextFrom . display
 -- | CI's human-readable label per state, optionally annotated with the
 -- elapsed time the node spent running, suffixed with the recipe's log
 -- path so the GitHub UI's 140-char description carries a one-click
--- pointer to the matching file under @.justci\/\<sha\>\/@. Path stays
+-- pointer to the matching file under @.ci\/\<sha\>\/@. Path stays
 -- under ~80 chars at typical recipe-name lengths, leaving room for
 -- the state prose without truncation.
 --

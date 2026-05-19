@@ -14,10 +14,10 @@ Gated on the `CI` environment variable:
 
 | Mode | Trigger | Tree | Status posts | Runtime files |
 |---|---|---|---|---|
-| Local | `CI` unset | live working tree | none | `.justci/pc.log`, `.justci/pc.sock` |
-| Strict | `CI=true` | `git worktree` pinned to HEAD | `<recipe>@<platform>` per transition | `.justci/pc.log`, `.justci/pc.sock`, `.justci/worktree/`, `.justci/<sha>/<platform>/<recipe>.log` |
+| Local | `CI` unset | live working tree | none | `.ci/pc.log`, `.ci/pc.sock` |
+| Strict | `CI=true` | `git worktree` pinned to HEAD | `<recipe>@<platform>` per transition | `.ci/pc.log`, `.ci/pc.sock`, `.ci/worktree/`, `.ci/<sha>/<platform>/<recipe>.log` |
 
-Strict mode refuses to run if the working tree is dirty — the SHA on the green check must exactly match the bytes tested. A central observer subscribes to process-compose's `/process/states/ws` stream over a Unix domain socket; in strict mode it posts a status (`pending`, then `success`/`failure`, or `error` for skipped nodes) for every state transition, and in both modes it folds each terminal state into a per-node outcome map. At end-of-run that map is printed as a per-node summary and reduced to the process's exit code (zero only if every node finished `Success`). Each node's stdout/stderr is split into its own `.justci/<sha>/<platform>/<recipe>.log`, and the GitHub status `description` embeds that path — so a red check links straight to the failing log. The SHA-keyed directory keeps prior runs' logs alongside the latest. All runtime artifacts live under `$PWD/.justci/` (gitignored); process-compose binds the same UDS in both modes, so two concurrent justci runs in the same checkout collide on the socket and the second fails fast — the intended mutex.
+Strict mode refuses to run if the working tree is dirty — the SHA on the green check must exactly match the bytes tested. A central observer subscribes to process-compose's `/process/states/ws` stream over a Unix domain socket; in strict mode it posts a status (`pending`, then `success`/`failure`, or `error` for skipped nodes) for every state transition, and in both modes it folds each terminal state into a per-node outcome map. At end-of-run that map is printed as a per-node summary and reduced to the process's exit code (zero only if every node finished `Success`). Each node's stdout/stderr is split into its own `.ci/<sha>/<platform>/<recipe>.log`, and the GitHub status `description` embeds that path — so a red check links straight to the failing log. The SHA-keyed directory keeps prior runs' logs alongside the latest. All runtime artifacts live under `$PWD/.ci/` (gitignored); process-compose binds the same UDS in both modes, so two concurrent justci runs in the same checkout collide on the socket and the second fails fast — the intended mutex.
 
 ### Platform fanout
 
@@ -34,7 +34,7 @@ Process-compose node names are `<recipe>@<platform>` (e.g. `ci::build@linux`), a
 
 ### Remote builds over SSH
 
-A node whose platform doesn't match the local host runs via SSH: the runner pipes a `git bundle` through `ssh <host>`, the remote shell clones it into a tempdir, checks out the pipeline's `HEAD` SHA, and runs `just --no-deps <recipe>` there. Per-node stdout/stderr streams back over SSH and lands in `.justci/<sha>/<platform>/<recipe>.log` exactly as a local node would.
+A node whose platform doesn't match the local host runs via SSH: the runner pipes a `git bundle` through `ssh <host>`, the remote shell clones it into a tempdir, checks out the pipeline's `HEAD` SHA, and runs `just --no-deps <recipe>` there. Per-node stdout/stderr streams back over SSH and lands in `.ci/<sha>/<platform>/<recipe>.log` exactly as a local node would.
 
 Hosts are configured in `~/.config/justci/hosts.json`, keyed by **Nix system tuple**:
 

@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The per-run log path convention:
--- @.justci\/\<short-sha\>\/\<platform\>\/\<recipe\>.log@.
+-- @.ci\/\<short-sha\>\/\<platform\>\/\<recipe\>.log@.
 -- One module owns the whole shape — SHA-keyed directory (7-char
 -- abbreviated, so the path fits GitHub's 140-char commit-status
 -- @description@ budget), a per-platform subdirectory (so the
@@ -34,14 +34,14 @@ import System.FilePath ((</>))
 -- is far beyond any real CI workload; and it fits comfortably inside GitHub's
 -- 140-char commit-status @description@ budget.
 --
--- Both 'logDirFor' (local @.justci\/\<sha\>\/@ path) and 'JustCI.Transport.cachedRunDir'
+-- Both 'logDirFor' (local @.ci\/\<sha\>\/@ path) and 'JustCI.Transport.cachedRunDir'
 -- (remote @\${XDG_STATE_HOME:-\$HOME/.local/state}\/justci\/\<sha\>\/@ path) must use the same prefix length so
 -- a contributor can correlate the two directories. Import this constant rather
 -- than hardcoding @7@.
 shortShaLen :: Int
 shortShaLen = 7
 
--- | Compose the per-run log directory: @.justci\/\<short-sha\>\/@. Returns
+-- | Compose the per-run log directory: @.ci\/\<short-sha\>\/@. Returns
 -- a repo-relative path with a 'shortShaLen'-char abbreviated SHA so the
 -- @description@ field on a GitHub commit status stays readable inside
 -- its 140-char budget (a 40-char hex blob blew most of it on one
@@ -56,12 +56,12 @@ logDirFor sha
           <> show shortShaLen
           <> " chars: "
           <> T.unpack shaText
-  | otherwise = ".justci" </> T.unpack (T.take shortShaLen shaText)
+  | otherwise = ".ci" </> T.unpack (T.take shortShaLen shaText)
   where
     shaText = display sha
 
 -- | Per-platform subdirectory under the run's log directory.
--- @.justci\/\<short-sha\>\/\<platform\>\/@. Exposed so 'JustCI.Pipeline' can
+-- @.ci\/\<short-sha\>\/\<platform\>\/@. Exposed so 'JustCI.Pipeline' can
 -- create the directories ahead of process-compose's spawn — the
 -- per-recipe log files inside don't get auto-created by pc.
 platformDir :: FilePath -> Platform -> FilePath

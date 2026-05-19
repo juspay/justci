@@ -84,7 +84,7 @@ data Process = Process
     working_dir :: Maybe FilePath,
     -- | When set, process-compose routes this process's stdout/stderr to
     --     the given file instead of the global @-L@ log. Used in strict mode
-    --     to split per-recipe output into @.justci\/\<sha\>\/\<recipe\>.log@ so
+    --     to split per-recipe output into @.ci\/\<sha\>\/\<recipe\>.log@ so
     --     the GitHub commit status can embed a navigable path to the failing
     --     log. 'Nothing' falls back to the global log.
     log_location :: Maybe FilePath
