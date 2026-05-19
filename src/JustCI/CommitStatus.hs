@@ -10,7 +10,7 @@
 --     'seedPending' fans out @Pending@ posts at the top of a run so
 --     every expected check appears at once, and 'postStatusFor'
 --     translates each in-flight 'ProcessState' event into the
---     matching @Pending@ / @Success@ / @Failure@ / @Error@ update.
+--     matching @Pending@ / @Success@ / @Failure@ update.
 --   * The setup-node filter — internal plumbing nodes ('SetupNode')
 --     are excluded from both the seed and the per-event posts via a
 --     pattern match on 'NodeId', matching the same filter
@@ -45,6 +45,10 @@ module JustCI.CommitStatus
     -- ^ Exposed only for "test.JustCI.VerdictSpec"'s cross-module
     -- agreement check against 'JustCI.Verdict.terminalToOutcome' —
     -- production code reaches this mapping through 'postStatusFor'.
+    describePost,
+    -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the wire-status
+    -- → @(CommitStatus, description)@ classifier's branches stay locked,
+    -- including the path-omitting did-not-run cases (issue #26).
     formatElapsed,
     -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the human-readable
     -- duration formatter's branches stay locked.
@@ -52,6 +56,8 @@ module JustCI.CommitStatus
 where
 
 import Control.Concurrent.Async (forConcurrently_)
+import Control.Monad (when)
+import Data.Foldable (for_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -63,7 +69,7 @@ import JustCI.Gh (CommitStatus (..), CommitStatusPost (..), Context, Repo, conte
 import JustCI.Git (Sha)
 import JustCI.LogPath (logPathFor)
 import JustCI.Node (NodeId (..))
-import JustCI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..), TerminalStatus (..), psToTerminalStatus)
+import JustCI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..), TerminalStatus (..))
 import System.IO (hPutStrLn, stderr)
 
 -- | Given a process-compose state event for an already-parsed
@@ -80,7 +86,10 @@ import System.IO (hPutStrLn, stderr)
 -- GitHub UI carries a navigable pointer to the failing output. The
 -- same path is set as the process's @log_location@ in the
 -- process-compose YAML, so the file on disk and the path in the
--- status agree by construction.
+-- status agree by construction. The two did-not-run terminal states
+-- ('PsSkipped', 'PsErrored') suppress the path — those nodes never
+-- wrote a log file, and a pointer to a missing file made every
+-- cascaded check after a failed setup misleading (issue #26).
 --
 -- Synchronous: each post blocks the subscription loop in
 -- 'JustCI.ProcessCompose.Events.subscribeStates' until @gh api@ returns. This
@@ -97,25 +106,21 @@ import System.IO (hPutStrLn, stderr)
 postStatusFor :: Timings -> Repo -> Sha -> FilePath -> NodeId -> ProcessState -> IO ()
 postStatusFor timings repo sha logDir node ps
   | not (isUserVisible node) = pure ()
-  | otherwise = case ps.status of
-      PsRunning -> do
-        markStart timings node
-        postOne repo sha node Pending (describe Pending Nothing (logPathFor logDir node))
-      _ -> case psToTerminalStatus ps of
-        Nothing -> pure ()
-        Just ts -> do
-          mElapsed <- elapsedSince timings node
-          let cs = terminalToCommitStatus ts
-          postOne repo sha node cs (describe cs mElapsed (logPathFor logDir node))
+  | otherwise = do
+      when (ps.status == PsRunning) (markStart timings node)
+      mElapsed <- elapsedSince timings node
+      for_ (describePost ps mElapsed (logPathFor logDir node)) $ \(cs, desc) ->
+        postOne repo sha node cs desc
 
 -- | Pre-seed every node with a 'Pending' commit status at startup —
 -- one parallel @gh api@ POST per node, all joined before this returns.
 -- The PR's checks panel shows the full set of expected checks the moment
 -- the pipeline begins, instead of materializing them one at a time as
--- nodes start. Skipped nodes (whose dep failed) get their @pending@
--- overwritten by @error@ when 'postStatusFor' fires; nodes that never
--- run at all stay at @pending@, which surfaces as a visible "why is
--- this still pending?" signal rather than silent absence.
+-- nodes start. Skipped nodes (whose upstream dep failed) get their
+-- @pending@ overwritten by @failure@ when 'postStatusFor' fires; nodes
+-- that never produce any event at all stay at @pending@, which
+-- surfaces as a visible "why is this still pending?" signal rather
+-- than silent absence.
 --
 -- GitHub has no batch endpoint for commit statuses
 -- (see <https://docs.github.com/en/rest/commits/statuses>), so this is
@@ -157,38 +162,49 @@ postOne repo sha node cs desc = do
 contextForNode :: NodeId -> Context
 contextForNode = contextFrom . display
 
--- | CI's human-readable label per state, optionally annotated with the
--- elapsed time the node spent running, suffixed with the recipe's log
--- path so the GitHub UI's 140-char description carries a one-click
--- pointer to the matching file under @.ci\/\<sha\>\/@. Path stays
--- under ~80 chars at typical recipe-name lengths, leaving room for
--- the state prose without truncation.
+-- | Classify a process-compose state event into the @(commit-status,
+-- description)@ pair the per-event poster sends to GitHub. 'Nothing'
+-- for events the poster drops on the floor (non-terminal 'PsOther').
 --
--- Elapsed time is only present on terminal posts (Success/Failure/Error);
--- the @PsRunning@ → @Pending@ transition fires at start, so its elapsed
--- would be zero — pointless to display. Pending posts get @Nothing@.
-describe :: CommitStatus -> Maybe NominalDiffTime -> FilePath -> Text
-describe cs mElapsed = withLogPath (stateLabel cs <> elapsedSuffix mElapsed)
+-- The description's two shapes:
+--
+--   * /Ran-or-running/ ('PsRunning', 'PsCompleted') — embeds the
+--     recipe's per-run log path so a click on the GitHub check
+--     lands on the matching file under @.ci\/\<sha\>\/@. The
+--     'PsRunning' transition fires at start so its elapsed would
+--     be zero (pointless to display); 'PsCompleted' carries the
+--     caller's measured elapsed in a @(\<elapsed\>)@ annotation.
+--
+--   * /Did-not-run/ ('PsSkipped', 'PsErrored') — drops the log
+--     path entirely (the file doesn't exist on disk; the cascade
+--     left no output) and the elapsed (no meaningful runtime), in
+--     favour of a short standalone label that names the failure
+--     mode. Prior to issue #26 these embedded the recipe's log
+--     path unconditionally, so a failed setup turned every
+--     downstream check into a broken pointer on the PR.
+--
+-- Both shapes stay well under GitHub's 140-char description budget
+-- at typical recipe-name lengths.
+describePost :: ProcessState -> Maybe NominalDiffTime -> FilePath -> Maybe (CommitStatus, Text)
+describePost ps mElapsed logPath = case ps.status of
+  PsRunning -> Just (Pending, ranLabel "Running" Nothing)
+  PsCompleted
+    | ps.exit_code == 0 -> Just (Success, ranLabel "Succeeded" mElapsed)
+    | otherwise -> Just (Failure, ranLabel "Failed" mElapsed)
+  PsSkipped -> Just (Failure, "Skipped (upstream failed)")
+  PsErrored -> Just (Failure, "Errored (did not start)")
+  PsOther _ -> Nothing
   where
-    stateLabel Pending = "Running"
-    stateLabel Success = "Succeeded"
-    stateLabel Failure = "Failed"
-    stateLabel Error = "Errored"
+    ranLabel label elapsed = label <> elapsedSuffix elapsed <> ": " <> T.pack logPath
     elapsedSuffix Nothing = ""
     elapsedSuffix (Just dt) = " (" <> formatElapsed dt <> ")"
 
--- | Description for a 'seedPending' post, formatted the same way as
--- 'describe' so the seed and transition lifecycles share one path-bearing
--- shape. If the description format ever changes (e.g. path moves to a
--- @target_url@ field), 'withLogPath' is the single edit site.
+-- | Description for a 'seedPending' post: @"Queued: \<logPath\>"@.
+-- The seed runs once per node at startup before any state event
+-- arrives, so it has its own format — the per-event 'describePost'
+-- doesn't see this lifecycle stage.
 seedDescription :: FilePath -> Text
-seedDescription = withLogPath "Queued"
-
--- | Internal: @\<label\>: \<logPath\>@. Owns the description shape so
--- every status post under the same SHA + context carries the same
--- format across its lifecycle.
-withLogPath :: Text -> FilePath -> Text
-withLogPath label logPath = label <> ": " <> T.pack logPath
+seedDescription logPath = "Queued: " <> T.pack logPath
 
 -- | Compact human-readable rendering of a 'NominalDiffTime': @\<n\>s@
 -- under a minute, @\<n\>m\<n\>s@ under an hour, @\<n\>h\<n\>m@ otherwise.
@@ -248,13 +264,13 @@ elapsedSince (Timings ref) node = do
       now <- getCurrentTime
       pure (Just (diffUTCTime now start))
 
--- | GitHub-side mapping for the two terminal classifications. The
--- wire-layer 'PsSkipped' / 'PsErrored' have already been folded into
--- 'TsFailed' by 'JustCI.ProcessCompose.Events.psToTerminalStatus', so the
--- @Error@-vs-@Failure@ distinction we used to make for "upstream
--- cascaded" doesn't exist here — every non-success surfaces as
--- @Failure@. The cascade story is reconstructed elsewhere from the
--- dep graph + outcome map.
+-- | GitHub-side mapping for the two terminal classifications.
+-- Production code now classifies each wire event through 'describePost'
+-- (which distinguishes 'PsSkipped' \/ 'PsErrored' from 'PsCompleted'
+-- exit-non-zero so it can drop the log path for nodes that never ran —
+-- issue #26), but the binary "did it succeed?" projection still lives
+-- here for "JustCI.Verdict.terminalToOutcome" to align against. The
+-- cross-module agreement test in @VerdictSpec@ relies on this seam.
 terminalToCommitStatus :: TerminalStatus -> CommitStatus
 terminalToCommitStatus TsSucceeded = Success
 terminalToCommitStatus TsFailed = Failure
