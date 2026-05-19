@@ -9,6 +9,16 @@
             "command": ".claude/hooks/agency/scripts/do-stop-guard.sh"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/agency/scripts/do-stop-guard.sh"
+          }
+        ],
+        "_apm_source": "agency"
       }
     ]
   }
