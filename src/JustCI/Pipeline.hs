@@ -94,43 +94,44 @@ ensureRunDir = do
         lock = dir </> "lock"
       }
 
--- | Take an exclusive kernel file lock on @lockPath@ for the duration of
--- @action@. Refuses fast (via 'die') if another justci run already holds
--- the lock in this checkout — the kernel guarantees mutual exclusion
--- between 'runLocal' / 'runStrict' invocations against the same @.ci\/@.
+-- | Take an exclusive kernel file lock on @lockPath@, unlink any stale
+-- @sockFile@ left behind by a crashed prior run, and run @action@. The
+-- lock is released when the file handle closes (clean exit, signal,
+-- @kill -9@, segfault — all covered by 'withFile'+kernel-flock
+-- semantics). Refuses fast (via 'die') if another justci already holds
+-- the lock in this checkout.
+--
+-- Lock and unlink fused into one bracket so the "cleanup happens under
+-- the lock" invariant lives in the signature, not in a call-site
+-- comment. Splitting them — even as two helpers called back-to-back in
+-- every run mode — drifts: a future @runFoo@ that adopts the lock and
+-- forgets the companion unlink silently reintroduces juspay\/justci#10.
 --
 -- Why a kernel lock and not "probe the UDS to see if pc is alive": the
 -- probe-then-act dance is racy (TOCTOU between liveness check and bind,
 -- two concurrent justcis both seeing "stale" and deleting each other's
 -- live socket). 'hTryLock' is atomic at the syscall layer — no window,
--- auto-released on every form of holder death (clean exit, signal,
--- @kill -9@, segfault), no manual cleanup. Ships with @base@ via
--- "GHC.IO.Handle.Lock", no new dep.
+-- no manual cleanup. Ships with @base@ via "GHC.IO.Handle.Lock", no new
+-- dep.
 --
--- The held lock also means 'cleanStaleSock' is safe: any process-compose
--- that owned @.ci\/pc.sock@ released the kernel lock by dying, so the
--- socket file we see is unconditionally stale and can be unlinked
--- before pc tries to bind.
+-- The unlink is safe because holding the lock means no live pc owns
+-- @sockFile@: any prior owner released the kernel lock by dying, so
+-- whatever file sits on disk is unconditionally stale. Without the
+-- unlink, pc's bind would fail with @address already in use@ and the
+-- new orchestrator would silently attach to the surviving old pc.
 --
--- See juspay\/justci#10 for the full design and the prior
--- always-UDS attempt that this replaces.
-withCiLock :: FilePath -> IO a -> IO a
-withCiLock lockPath action =
+-- See juspay\/justci#10 for the full design and the prior always-UDS
+-- attempt that this replaces.
+withCiLock :: FilePath -> FilePath -> IO a -> IO a
+withCiLock lockPath sockFile action =
   withFile lockPath ReadWriteMode $ \h -> do
     acquired <- hTryLock h ExclusiveLock
     if acquired
-      then action
+      then do
+        staleSock <- doesPathExist sockFile
+        when staleSock (removeFile sockFile)
+        action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
-
--- | Unlink @path@ if it exists. Called inside 'withCiLock' before pc
--- spawns: holding the lock guarantees no live pc owns the socket (a
--- crashed prior owner released the kernel lock by dying), so the file
--- on disk is unconditionally stale and pc would otherwise refuse to
--- bind an existing path with @address already in use@.
-cleanStaleSock :: FilePath -> IO ()
-cleanStaleSock path = do
-  exists <- doesPathExist path
-  when exists $ removeFile path
 
 -- | Local mode: live working tree, no GitHub status posts, no per-recipe
 -- log routing. The observer still runs — its only consumer is the
@@ -149,12 +150,11 @@ cleanStaleSock path = do
 -- invisible to remote lanes; the bundle reflects committed history
 -- only.
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
-runLocal opts passthrough dirs = withCiLock dirs.lock $ do
+runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
-  cleanStaleSock dirs.sock
   withObserver dirs.sock onState $
     void $
       runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
@@ -187,7 +187,7 @@ runLocal opts passthrough dirs = withCiLock dirs.lock $ do
 -- outcome map is the source of truth; 'exitWithVerdict' derives the
 -- final 'ExitCode' from it.
 runStrict :: RunOpts -> [String] -> RunDir -> IO ()
-runStrict opts passthrough dirs = withCiLock dirs.lock $ do
+runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
@@ -203,7 +203,6 @@ runStrict opts passthrough dirs = withCiLock dirs.lock $ do
     let onState ps = withParsedNode ps $ \node ->
           postStatusFor timings repo sha logDir node ps
             >> recordOutcome outcomes node ps
-    cleanStaleSock dirs.sock
     withObserver dirs.sock onState $
       void $
         runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
