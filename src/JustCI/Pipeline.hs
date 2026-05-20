@@ -540,9 +540,11 @@ hostFor hosts n = case lookupHost (nodePlatform n) hosts of
   Just h -> display h
   Nothing -> "local"
 
--- | The single 'die' site in the project: every recoverable failure
--- mode threads up through @Either e a@ to this boundary, where the
--- structured error's 'Display' rendering becomes the exit message.
+-- | The canonical exit point for recoverable failures: every @Either@-typed
+-- failure mode threads up to this boundary, where the structured error's
+-- 'Display' rendering becomes the exit message. Direct 'die' calls elsewhere
+-- are reserved for invariant violations (internal errors) or non-recoverable
+-- mutex failures ('withCiLock') where an @Either@ return would be meaningless.
 --
 -- Shape note: takes @Either e a@ rather than @IO (Either e a)@ so the
 -- same helper works for both pure Eithers (@dieOnLeft $ findRoot
