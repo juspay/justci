@@ -33,7 +33,7 @@ where
 
 import qualified Algebra.Graph.AdjacencyMap as G
 import Control.Concurrent.Async (link, wait, withAsync)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import qualified Data.ByteString as BS
 import Data.Foldable (for_)
 import Data.List (nub)
@@ -42,6 +42,7 @@ import qualified Data.Text as T
 import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
+import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (ProtectOpts (..), RunOpts (..))
 import JustCI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
@@ -59,9 +60,10 @@ import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
 import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
 import System.Exit (die)
 import System.FilePath ((</>))
+import System.IO (IOMode (..), withFile)
 
 -- | The runtime artifact paths under @\$PWD\/.ci\/@. Built once at the top
 -- of a run so 'runLocal' and 'runStrict' both reference the same
@@ -71,7 +73,8 @@ data RunDir = RunDir
   { worktreePath :: FilePath,
     sock :: FilePath,
     pcLog :: FilePath,
-    pcYaml :: FilePath
+    pcYaml :: FilePath,
+    lock :: FilePath
   }
 
 -- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
@@ -87,8 +90,47 @@ ensureRunDir = do
       { worktreePath = dir </> "worktree",
         sock = dir </> "pc.sock",
         pcLog = dir </> "pc.log",
-        pcYaml = dir </> "pc.yaml"
+        pcYaml = dir </> "pc.yaml",
+        lock = dir </> "lock"
       }
+
+-- | Take an exclusive kernel file lock on @lockPath@ for the duration of
+-- @action@. Refuses fast (via 'die') if another justci run already holds
+-- the lock in this checkout — the kernel guarantees mutual exclusion
+-- between 'runLocal' / 'runStrict' invocations against the same @.ci\/@.
+--
+-- Why a kernel lock and not "probe the UDS to see if pc is alive": the
+-- probe-then-act dance is racy (TOCTOU between liveness check and bind,
+-- two concurrent justcis both seeing "stale" and deleting each other's
+-- live socket). 'hTryLock' is atomic at the syscall layer — no window,
+-- auto-released on every form of holder death (clean exit, signal,
+-- @kill -9@, segfault), no manual cleanup. Ships with @base@ via
+-- "GHC.IO.Handle.Lock", no new dep.
+--
+-- The held lock also means 'cleanStaleSock' is safe: any process-compose
+-- that owned @.ci\/pc.sock@ released the kernel lock by dying, so the
+-- socket file we see is unconditionally stale and can be unlinked
+-- before pc tries to bind.
+--
+-- See juspay\/justci#10 for the full design and the prior
+-- always-UDS attempt that this replaces.
+withCiLock :: FilePath -> IO a -> IO a
+withCiLock lockPath action =
+  withFile lockPath ReadWriteMode $ \h -> do
+    acquired <- hTryLock h ExclusiveLock
+    if acquired
+      then action
+      else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
+
+-- | Unlink @path@ if it exists. Called inside 'withCiLock' before pc
+-- spawns: holding the lock guarantees no live pc owns the socket (a
+-- crashed prior owner released the kernel lock by dying), so the file
+-- on disk is unconditionally stale and pc would otherwise refuse to
+-- bind an existing path with @address already in use@.
+cleanStaleSock :: FilePath -> IO ()
+cleanStaleSock path = do
+  exists <- doesPathExist path
+  when exists $ removeFile path
 
 -- | Local mode: live working tree, no GitHub status posts, no per-recipe
 -- log routing. The observer still runs — its only consumer is the
@@ -107,11 +149,12 @@ ensureRunDir = do
 -- invisible to remote lanes; the bundle reflects committed history
 -- only.
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
-runLocal opts passthrough dirs = do
+runLocal opts passthrough dirs = withCiLock dirs.lock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (processNames pc)
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
+  cleanStaleSock dirs.sock
   withObserver dirs.sock onState $
     void $
       runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
@@ -144,7 +187,7 @@ runLocal opts passthrough dirs = do
 -- outcome map is the source of truth; 'exitWithVerdict' derives the
 -- final 'ExitCode' from it.
 runStrict :: RunOpts -> [String] -> RunDir -> IO ()
-runStrict opts passthrough dirs = do
+runStrict opts passthrough dirs = withCiLock dirs.lock $ do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
@@ -160,6 +203,7 @@ runStrict opts passthrough dirs = do
     let onState ps = withParsedNode ps $ \node ->
           postStatusFor timings repo sha logDir node ps
             >> recordOutcome outcomes node ps
+    cleanStaleSock dirs.sock
     withObserver dirs.sock onState $
       void $
         runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
