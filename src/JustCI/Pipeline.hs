@@ -33,7 +33,8 @@ where
 
 import qualified Algebra.Graph.AdjacencyMap as G
 import Control.Concurrent.Async (link, wait, withAsync)
-import Control.Monad (void, when)
+import Control.Exception (catch, throwIO)
+import Control.Monad (unless, void)
 import qualified Data.ByteString as BS
 import Data.Foldable (for_)
 import Data.List (nub)
@@ -60,10 +61,11 @@ import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
 import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
-import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile)
 import System.Exit (die)
 import System.FilePath ((</>))
 import System.IO (IOMode (..), withFile)
+import System.IO.Error (isDoesNotExistError)
 
 -- | The runtime artifact paths under @\$PWD\/.ci\/@. Built once at the top
 -- of a run so 'runLocal' and 'runStrict' both reference the same
@@ -128,8 +130,8 @@ withCiLock lockPath sockFile action =
     acquired <- hTryLock h ExclusiveLock
     if acquired
       then do
-        staleSock <- doesPathExist sockFile
-        when staleSock (removeFile sockFile)
+        removeFile sockFile `catch` \e ->
+          unless (isDoesNotExistError e) (throwIO e)
         action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
 
