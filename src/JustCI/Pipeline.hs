@@ -22,6 +22,7 @@ module JustCI.Pipeline
     runGraph,
     runDumpYaml,
     runProtect,
+    runPcPassthrough,
 
     -- * Pipeline assembly
     RunMode (..),
@@ -44,7 +45,7 @@ import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
-import JustCI.CLI (ProtectOpts (..), RunOpts (..))
+import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
 import JustCI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
@@ -56,13 +57,13 @@ import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
 import JustCI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
 import JustCI.Platform (Platform, localPlatform)
-import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
+import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, runProcessComposeClient, toProcessCompose)
 import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
 import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile)
-import System.Exit (die)
+import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
+import System.Exit (ExitCode, die)
 import System.FilePath ((</>))
 import System.IO (IOMode (..), withFile)
 import System.IO.Error (isDoesNotExistError)
@@ -281,6 +282,28 @@ runProtect opts = do
         Nothing -> dieOnLeft =<< viewDefaultBranch
       dieOnLeft =<< setRequiredChecks repo branch contexts
       TIO.putStrLn $ "updated required_status_checks on " <> display branch <> " (" <> nCtx <> " contexts)"
+
+-- | Dispatch a live-introspection subcommand (@justci status@ / @logs@ /
+-- @monitor@) against the currently-running pipeline. Resolves the socket
+-- via the same 'RunDir' the run modes use, then shells out to the baked
+-- 'JustCI.ProcessCompose.processComposeBin' so the client version pins
+-- to whatever justci itself was built with — agents that pinned a tag
+-- of @juspay/justci@ get exactly that pc client talking to exactly that
+-- pc server, no nixpkgs-drift skew.
+--
+-- The 'doesPathExist' check is a courtesy: it converts the absent-socket
+-- case into a clear "no run in progress" message instead of pc's own
+-- @"connection refused"@. A stale socket (file present, pc dead) still
+-- falls through to pc, which reports its own connect failure — same
+-- failure shape as @ci@'s state-event observer hits in that scenario, so
+-- the error vocabulary is already consistent.
+runPcPassthrough :: PcVerb -> [String] -> RunDir -> IO ExitCode
+runPcPassthrough verb args dirs = do
+  alive <- doesPathExist dirs.sock
+  unless alive $
+    die $
+      "no justci run in progress in this checkout (no socket at " <> dirs.sock <> ")"
+  runProcessComposeClient dirs.sock (pcVerbArg verb) args
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc

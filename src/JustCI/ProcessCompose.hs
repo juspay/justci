@@ -21,6 +21,10 @@ module JustCI.ProcessCompose
     -- * Invocation
     UpInvocation (..),
     runProcessCompose,
+
+    -- * Live-pipeline client passthrough
+    pcClientArgs,
+    runProcessComposeClient,
   )
 where
 
@@ -39,7 +43,8 @@ import System.Which (staticWhich)
 
 -- | Absolute path to the @process-compose@ binary, baked in at compile time
 -- via Nix (see @settings.justci.extraBuildTools@ in @flake.nix@). Not exported:
--- the only spawn site is 'runProcessCompose' below.
+-- the only spawn sites are 'runProcessCompose' (server) and
+-- 'runProcessComposeClient' (passthrough to a running server) below.
 processComposeBin :: FilePath
 processComposeBin = $(staticWhich "process-compose")
 
@@ -232,6 +237,28 @@ runProcessCompose up pc = do
   withCreateProcess cp $ \_ _ _ ph -> waitForProcess ph
   where
     cp = proc processComposeBin (toUpArgs up)
+
+-- | Argv vector for shelling out to a running pc's @process <verb>@
+-- subcommand. The socket flags (@-U -u <sock>@) sit between the
+-- subcommand and the user-supplied tail so they shadow any @PC_SOCKET_PATH@
+-- env-var the caller's shell happens to carry. Exposed as a pure function
+-- separate from 'runProcessComposeClient' so the argv shape is unit-testable
+-- (see "JustCI.ProcessComposeSpec") without spawning a subprocess.
+pcClientArgs :: FilePath -> String -> [String] -> [String]
+pcClientArgs sock verb userArgs =
+  ["process", verb, "-U", "-u", sock] <> userArgs
+
+-- | Spawn the baked-in 'processComposeBin' as a client against a running
+-- pc at @sock@. Stdin/stdout/stderr inherit so @process logs -f@ streams
+-- to the caller's terminal and @process monitor@'s state events print as
+-- they happen. Returns pc's exit code unchanged — the caller
+-- (@app/Main.hs@) propagates it via 'System.Exit.exitWith' so a downstream
+-- agent sees pc's verdict directly.
+runProcessComposeClient :: FilePath -> String -> [String] -> IO ExitCode
+runProcessComposeClient sock verb userArgs =
+  withCreateProcess cp $ \_ _ _ ph -> waitForProcess ph
+  where
+    cp = proc processComposeBin (pcClientArgs sock verb userArgs)
 
 -- | Recover the dependency graph from an assembled 'ProcessCompose'.
 -- Useful for renderers that want the typed adjacency map back ('JustCI.Pipeline.runGraph'
