@@ -36,7 +36,7 @@ where
 import qualified Algebra.Graph.AdjacencyMap as G
 import Control.Concurrent.Async (link, wait, withAsync)
 import Control.Exception (catch, throwIO)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, void)
 import qualified Data.ByteString as BS
 import Data.Foldable (for_)
 import Data.List (nub)
@@ -47,13 +47,13 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
-import JustCI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
+import JustCI.CommitStatus (contextForNode, isPostable, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
 import JustCI.Hosts (Hosts, loadHosts, lookupHost, mergeHostOverrides)
-import JustCI.Justfile (Recipe, RecipeName, fetchDump, hasBody, recipeCommand)
+import JustCI.Justfile (Recipe, RecipeName, fetchDump, recipeCommand)
 import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
 import JustCI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
@@ -217,14 +217,13 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   withSnapshotWorktree dirs.worktreePath $ do
     (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
     let nodes = processNames pc
-        postable n = isUserVisible n && isBodyBearing recipes n
     createPlatformDirs logDir nodes
-    seedPending repo sha logDir (filter postable nodes)
+    seedPending repo sha logDir recipes nodes
     outcomes <- newOutcomes nodes
     timings <- newTimings
-    let onState ps = withParsedNode ps $ \node -> do
-          when (postable node) (postStatusFor timings repo sha logDir node ps)
-          recordOutcome outcomes node ps
+    let onState ps = withParsedNode ps $ \node ->
+          postStatusFor timings repo sha logDir recipes node ps
+            >> recordOutcome outcomes node ps
     withObserver dirs.sock onState $
       void $
         runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
@@ -285,8 +284,7 @@ runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
   (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
-  let postable n = isUserVisible n && isBodyBearing recipes n
-      contexts = contextForNode <$> filter postable (G.vertexList nodeGraph)
+  let contexts = contextForNode <$> filter (isPostable recipes) (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
@@ -578,22 +576,6 @@ commandForNode sha localPlat hosts node = case (node, lookupHost plat hosts) of
         "internal error: SetupNode for "
           <> T.unpack (display plat)
           <> " with no hosts entry (fanOut emits setup only for remote platforms)"
-
--- | Whether @node@ corresponds to a body-bearing recipe in @recipes@ —
--- i.e. a recipe that runs shell of its own rather than purely fanning
--- out to its dependencies. The second predicate in the GH-status
--- filter (the first being 'isUserVisible', a structural 'NodeId'
--- gate); composed at call sites in 'runStrict' and 'runProtect'. Pure
--- aggregators ('hasBody' false) would otherwise post a check whose
--- state can only follow a downstream node's first verdict — when
--- that downstream node is retried alone, the aggregator's check is
--- never re-posted and the PR wedges at @Skipped (upstream failed)@.
--- Setup nodes pass this predicate vacuously: they aren't recipes, so
--- "body-bearing" doesn't apply, and 'isUserVisible' already filters
--- them out one layer up.
-isBodyBearing :: Map.Map RecipeName Recipe -> NodeId -> Bool
-isBodyBearing _ (SetupNode _) = True
-isBodyBearing recipes (RecipeNode r _) = maybe False hasBody (Map.lookup r recipes)
 
 -- | The @NodeId -> host-label@ resolver the verdict summary prints.
 -- Pure: closes over an already-loaded 'Hosts' so the caller controls
