@@ -47,13 +47,13 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
-import JustCI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
+import JustCI.CommitStatus (contextForNode, isBodyBearing, isPostable, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
 import JustCI.Hosts (Hosts, loadHosts, lookupHost, mergeHostOverrides)
-import JustCI.Justfile (RecipeName, fetchDump, recipeCommand)
+import JustCI.Justfile (Recipe, RecipeName, fetchDump, recipeCommand)
 import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
 import JustCI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
@@ -172,8 +172,8 @@ withCiLock lockPath sockFile action =
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
-  outcomes <- newOutcomes (processNames pc)
+  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
+  outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
     void $
@@ -214,14 +214,14 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    pc <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
+    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
     let nodes = processNames pc
     createPlatformDirs logDir nodes
-    seedPending repo sha logDir nodes
-    outcomes <- newOutcomes nodes
+    seedPending repo sha logDir recipes nodes
+    outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
     timings <- newTimings
     let onState ps = withParsedNode ps $ \node ->
-          postStatusFor timings repo sha logDir node ps
+          postStatusFor timings repo sha logDir recipes node ps
             >> recordOutcome outcomes node ps
     withObserver dirs.sock onState $
       void $
@@ -246,7 +246,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -256,7 +256,7 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  pc <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   BS.putStr (Y.encode pc)
 
 -- | Branch-protection helper: read the canonical DAG, extract the
@@ -282,8 +282,8 @@ runDumpYaml = do
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
-  (nodeGraph, _) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
-  let contexts = contextForNode <$> filter isUserVisible (G.vertexList nodeGraph)
+  (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
+  let contexts = contextForNode <$> filter (isPostable recipes) (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
@@ -467,10 +467,15 @@ instance Display BuildGraphError where
 -- and the fanout policy; YAML field names / dep-edge syntax change
 -- with process-compose's schema.
 --
--- Returns the filtered fanned-out graph plus the local platform —
--- the latter is needed downstream for transport selection
--- ('commandForNode') and is computed here anyway as part of fanout.
-buildNodeGraph :: Hosts -> DagSelection -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform))
+-- Returns the filtered fanned-out graph, the local platform, and the
+-- full justfile recipe map (keyed by 'RecipeName'). The platform is
+-- needed downstream for transport selection ('commandForNode'); the
+-- recipe map is needed by 'JustCI.CommitStatus.isPostable' so the
+-- GH-status and branch-protection filters can drop pure aggregators.
+-- Both are computed here anyway as part of fanout — exposing them
+-- avoids shelling out to @just --dump@ a second time and avoids the
+-- dormant divergence risk of two parses going out of sync mid-run.
+buildNodeGraph :: Hosts -> DagSelection -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform, Map.Map RecipeName Recipe))
 buildNodeGraph hosts sel = do
   recipes <- dieOnLeft =<< fetchDump
   rootResult <- case sel.rootOverride of
@@ -494,7 +499,7 @@ buildNodeGraph hosts sel = do
         _ -> do
           let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
           nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
-          pure (Right (nodeGraph, localPlat))
+          pure (Right (nodeGraph, localPlat, recipes))
 
 -- | Build the full 'ProcessCompose' YAML: extends 'buildNodeGraph'
 -- with SHA resolution, transport command rendering, and the
@@ -507,12 +512,12 @@ buildNodeGraph hosts sel = do
 -- depending on whether its platform matches the runner's; the
 -- 'JustCI.Transport' builders are the only site that know SSH command
 -- shapes.
-buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO (Either BuildGraphError ProcessCompose)
+buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO (Either BuildGraphError (ProcessCompose, Map.Map RecipeName Recipe))
 buildProcessCompose hosts sel mode = do
   result <- buildNodeGraph hosts sel
   case result of
     Left err -> pure (Left err)
-    Right (nodeGraph, localPlat) -> do
+    Right (nodeGraph, localPlat, recipes) -> do
       -- Same predicate 'fanOut' uses to decide where to emit setup
       -- nodes — sourcing both from one definition avoids the dormant
       -- divergence risk of two near-identical "is this platform
@@ -532,7 +537,7 @@ buildProcessCompose hosts sel mode = do
         _ -> pure shaPlaceholder
       let mkCommand = commandForNode sha localPlat hosts
           (yamlWorkingDir, yamlLogLocation) = yamlPathsFor mode
-      pure (Right (toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph))
+      pure (Right (toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph, recipes))
 
 -- | Per-node command construction. Dispatches over (host lookup,
 -- node kind) and picks one of the three valid command builders in

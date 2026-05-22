@@ -38,7 +38,8 @@ module JustCI.CommitStatus
 
     -- * Naming convention
     contextForNode,
-    isUserVisible,
+    isPostable,
+    isBodyBearing,
 
     -- * === Internal (test surface) ===
     terminalToCommitStatus,
@@ -67,6 +68,7 @@ import Data.Text.Display (display)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import JustCI.Gh (CommitStatus (..), CommitStatusPost (..), Context, Repo, contextFrom, postCommitStatus)
 import JustCI.Git (Sha)
+import JustCI.Justfile (Recipe, RecipeName, hasBody)
 import JustCI.LogPath (logPathFor)
 import JustCI.Node (NodeId (..))
 import JustCI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..), TerminalStatus (..))
@@ -103,9 +105,9 @@ import System.IO (hPutStrLn, stderr)
 -- Posting failures are logged to stderr with a @gh:@ prefix and
 -- swallowed — the node's exit code must not depend on whether a
 -- status post succeeded.
-postStatusFor :: Timings -> Repo -> Sha -> FilePath -> NodeId -> ProcessState -> IO ()
-postStatusFor timings repo sha logDir node ps
-  | not (isUserVisible node) = pure ()
+postStatusFor :: Timings -> Repo -> Sha -> FilePath -> Map RecipeName Recipe -> NodeId -> ProcessState -> IO ()
+postStatusFor timings repo sha logDir recipes node ps
+  | not (isPostable recipes node) = pure ()
   | otherwise = do
       when (ps.status == PsRunning) (markStart timings node)
       mElapsed <- elapsedSince timings node
@@ -127,19 +129,58 @@ postStatusFor timings repo sha logDir node ps
 -- N parallel single-status POSTs. 'forConcurrently_' joins all of them
 -- before returning, so the caller can rely on every seed being in place
 -- before the pipeline kicks off.
-seedPending :: Repo -> Sha -> FilePath -> [NodeId] -> IO ()
-seedPending repo sha logDir nodes =
-  forConcurrently_ (filter isUserVisible nodes) $ \n ->
+seedPending :: Repo -> Sha -> FilePath -> Map RecipeName Recipe -> [NodeId] -> IO ()
+seedPending repo sha logDir recipes nodes =
+  forConcurrently_ (filter (isPostable recipes) nodes) $ \n ->
     postOne repo sha n Pending $ seedDescription $ logPathFor logDir n
 
 -- | Whether a 'NodeId' belongs on the PR's user-facing checks page.
--- Setup nodes are internal plumbing (bundle ship, drv copy) and
--- never get GH posts; recipe nodes are the user's work and always
--- do. The single source of truth for "is this user-facing?",
--- consumed by both 'seedPending' and 'postStatusFor'.
-isUserVisible :: NodeId -> Bool
-isUserVisible (RecipeNode _ _) = True
-isUserVisible (SetupNode _) = False
+-- The single source of truth for "post a GH commit status for this
+-- node?", consumed by both 'seedPending' and 'postStatusFor' and by
+-- 'JustCI.Pipeline.runProtect' when assembling the branch-protection
+-- required-checks list.
+--
+-- Two axes of exclusion, both rejected:
+--
+--   * @SetupNode@s — internal plumbing (bundle ship, drv copy) that
+--     never represented user work in the first place; structurally
+--     unfit for a PR-visible check.
+--
+--   * @RecipeNode@s whose 'Recipe' has an empty 'hasBody' — pure
+--     dependency aggregators (e.g. @default: checks run-check@). Their
+--     state is fully derivative of their leaves, so a check posted for
+--     them is a denormalised duplicate that diverges from reality the
+--     moment a downstream leaf is retried individually. The retry
+--     overwrites the leaf's check to green but the aggregator's
+--     'Skipped (upstream failed)' was never tied to a re-runnable
+--     process, so it sticks at red and the PR can't merge. Removing
+--     aggregators from the surface entirely means the required checks
+--     are exactly the recipes that do real work.
+isPostable :: Map RecipeName Recipe -> NodeId -> Bool
+isPostable _ (SetupNode _) = False
+isPostable recipes n@(RecipeNode _ _) = isBodyBearing recipes n
+
+-- | Whether @node@ is body-bearing — the narrower axis 'isPostable'
+-- delegates its recipe-side check to. Vacuously 'True' for
+-- 'SetupNode' (it isn't a recipe, so the axis doesn't apply); for
+-- 'RecipeNode' it looks the recipe up in @recipes@ and asks 'hasBody'.
+-- Exists alongside 'isPostable' so the local verdict surface
+-- ('JustCI.Verdict.verdictSummary'), which keeps 'SetupNode's in its
+-- dedicated @Setup@ section but wants the same aggregator drop as
+-- the GH surface, can seed its outcomes map by this predicate. The
+-- 'SetupNode' clause's 'True' is the right vacuous value because
+-- callers that want to exclude setup nodes (i.e. 'isPostable')
+-- handle that case structurally before delegating here.
+--
+-- Like 'isPostable', a missing 'RecipeName' is a runner-internal
+-- contract violation, not a routine absent condition — every
+-- 'RecipeNode' in the fanned graph originates from the recipe map
+-- 'JustCI.Pipeline.buildNodeGraph' returned.
+isBodyBearing :: Map RecipeName Recipe -> NodeId -> Bool
+isBodyBearing _ (SetupNode _) = True
+isBodyBearing recipes (RecipeNode r _) = case Map.lookup r recipes of
+  Just recipe -> hasBody recipe
+  Nothing -> error $ "internal error: RecipeNode " <> T.unpack (display r) <> " missing from recipe map (buildNodeGraph contract violated)"
 
 -- | Issue one commit-status POST with a caller-supplied description and
 -- log the outcome.

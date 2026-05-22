@@ -26,6 +26,7 @@ module JustCI.Justfile
     fetchDump,
     parseDump,
     recipeCommand,
+    hasBody,
   )
 where
 
@@ -162,15 +163,33 @@ instance FromJSON Attribute where
 
 -- | A parsed recipe: its fully-qualified name (just's own @namepath@: bare
 -- for top-level recipes, @mod::name@ for submodule ones), its declared
--- dependencies, formal parameters, and recipe-level attributes.
+-- dependencies, formal parameters, recipe-level attributes, and the
+-- recipe body (each outer element is one source line; lines are
+-- preserved as a list-of-tokens just to mirror just's @body@ shape).
+-- The body distinguishes recipes that do real work from pure
+-- dependency aggregators like @ci::default@ or @ci::checks@; the
+-- runner uses 'hasBody' to drop aggregators from GH commit-status and
+-- branch-protection surfaces, since their state is fully derivative
+-- of their leaves.
 data Recipe = Recipe
   { namepath :: RecipeName,
     dependencies :: [Dep],
     parameters :: [Parameter],
-    attributes :: [Attribute]
+    attributes :: [Attribute],
+    body :: [[Text]]
   }
   deriving stock (Generic)
   deriving anyclass (FromJSON)
+
+-- | Whether a recipe carries shell commands of its own, as opposed to
+-- being a pure dependency aggregator. Reads directly off the 'body'
+-- field — non-empty means the recipe does real work and warrants
+-- user-visible status reporting; empty means the recipe exists only
+-- to fan out to its dependencies (e.g. @default: checks run-check@),
+-- and its commit status would be a denormalised duplicate of its
+-- leaves' outcomes that diverges on retry.
+hasBody :: Recipe -> Bool
+hasBody r = not (null r.body)
 
 -- | The @just --dump@ object, used recursively for both the top level and
 -- each submodule (just emits the same shape at both levels — same

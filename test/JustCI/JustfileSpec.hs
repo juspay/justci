@@ -11,7 +11,7 @@ module JustCI.JustfileSpec (spec) where
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import JustCI.Justfile (Attribute (..), Dep (..), Recipe (..), RecipeName, parseDump, recipeCommand)
+import JustCI.Justfile (Attribute (..), Dep (..), Recipe (..), RecipeName, hasBody, parseDump, recipeCommand)
 import Test.Hspec
 
 spec :: Spec
@@ -70,6 +70,17 @@ spec = do
           Left _ -> pure ()
           Right _ -> expectationFailure "expected Left on malformed JSON"
 
+  describe "hasBody" $ do
+    it "is False for a pure aggregator (empty body)" $ do
+      recipes <- decodeOrFail submoduleFixtureJson
+      entry <- requireRecipe recipes "sub::entry"
+      hasBody entry `shouldBe` False
+
+    it "is True for a recipe with shell lines" $ do
+      recipes <- decodeOrFail submoduleFixtureJson
+      shared <- requireRecipe recipes "sub::shared"
+      hasBody shared `shouldBe` True
+
 -- | Decode a fixture into the recipe map; 'fail' in 'IO' raises an
 -- exception hspec catches and reports with the supplied message.
 decodeOrFail :: BS.ByteString -> IO (Map.Map RecipeName Recipe)
@@ -93,14 +104,14 @@ isParallel _ = False
 -- can succeed on — exercises the no-flattening, no-qualifying path.
 topLevelOnlyJson :: BS.ByteString
 topLevelOnlyJson =
-  "{\"recipes\":{\"solo\":{\"namepath\":\"solo\",\"dependencies\":[],\"parameters\":[],\"attributes\":[]}},\"modules\":{}}"
+  "{\"recipes\":{\"solo\":{\"namepath\":\"solo\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo solo\"]]}},\"modules\":{}}"
 
 -- | A top-level recipe whose dep is already qualified to a submodule
 -- recipe (e.g. a top-level @ci: sub::leaf@). Qualification must trust
 -- the @::@ verbatim and not double-prefix.
 crossModuleDepJson :: BS.ByteString
 crossModuleDepJson =
-  "{\"recipes\":{\"default\":{\"namepath\":\"default\",\"dependencies\":[{\"recipe\":\"sub::leaf\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[]}},\"modules\":{\"sub\":{\"recipes\":{\"leaf\":{\"namepath\":\"sub::leaf\",\"dependencies\":[],\"parameters\":[],\"attributes\":[]}},\"modules\":{}}}}"
+  "{\"recipes\":{\"default\":{\"namepath\":\"default\",\"dependencies\":[{\"recipe\":\"sub::leaf\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[],\"body\":[]}},\"modules\":{\"sub\":{\"recipes\":{\"leaf\":{\"namepath\":\"sub::leaf\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo leaf\"]]}},\"modules\":{}}}}"
 
 -- | The shape the @test/fixtures/with-module@ justfile produces: a
 -- bare top-level @default@ plus a @sub@ module with five recipes —
@@ -109,13 +120,16 @@ crossModuleDepJson =
 -- and @b@ depending on a shared upstream @shared@, and @shared@
 -- itself with no deps. Mirrors the json captured by running
 -- @just --dump --dump-format json@ in that fixture directory.
+-- @entry@ and @fan@ are pure aggregators (empty @body@); the
+-- remaining recipes carry one-line bodies so 'hasBody' tests have
+-- both shapes to exercise.
 submoduleFixtureJson :: BS.ByteString
 submoduleFixtureJson =
-  "{\"recipes\":{\"default\":{\"namepath\":\"default\",\"dependencies\":[],\"parameters\":[],\"attributes\":[]}},\
+  "{\"recipes\":{\"default\":{\"namepath\":\"default\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[]}},\
   \\"modules\":{\"sub\":{\"recipes\":{\
-  \\"a\":{\"namepath\":\"sub::a\",\"dependencies\":[{\"recipe\":\"shared\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[]},\
-  \\"b\":{\"namepath\":\"sub::b\",\"dependencies\":[{\"recipe\":\"shared\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[]},\
-  \\"entry\":{\"namepath\":\"sub::entry\",\"dependencies\":[{\"recipe\":\"a\",\"arguments\":[]},{\"recipe\":\"b\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[{\"metadata\":[\"ci\"]}]},\
-  \\"fan\":{\"namepath\":\"sub::fan\",\"dependencies\":[{\"recipe\":\"a\",\"arguments\":[]},{\"recipe\":\"b\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[\"parallel\"]},\
-  \\"shared\":{\"namepath\":\"sub::shared\",\"dependencies\":[],\"parameters\":[],\"attributes\":[]}\
+  \\"a\":{\"namepath\":\"sub::a\",\"dependencies\":[{\"recipe\":\"shared\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo a\"]]},\
+  \\"b\":{\"namepath\":\"sub::b\",\"dependencies\":[{\"recipe\":\"shared\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo b\"]]},\
+  \\"entry\":{\"namepath\":\"sub::entry\",\"dependencies\":[{\"recipe\":\"a\",\"arguments\":[]},{\"recipe\":\"b\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[{\"metadata\":[\"ci\"]}],\"body\":[]},\
+  \\"fan\":{\"namepath\":\"sub::fan\",\"dependencies\":[{\"recipe\":\"a\",\"arguments\":[]},{\"recipe\":\"b\",\"arguments\":[]}],\"parameters\":[],\"attributes\":[\"parallel\"],\"body\":[]},\
+  \\"shared\":{\"namepath\":\"sub::shared\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo shared\"]]}\
   \},\"modules\":{}}}}"
