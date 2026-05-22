@@ -174,7 +174,7 @@ commandParser =
         <> O.command "logs" (pcPassthroughInfo PcLogs "Tail or follow one node's logs in the running pipeline. Positional argument is the process name (`<recipe>@<platform>`); `-f` follows. Forwards to `process-compose process logs`.")
         <> O.command "monitor" (pcPassthroughInfo PcMonitor "Live state-transition stream for every node in the running pipeline. Forwards to `process-compose process monitor`. Pass `-o json` for one JSON event per line.")
     )
-    <|> (Run <$> runOptsParser)
+    <|> Run <$> runOptsParser
 
 -- | 'ParserInfo' for a live-introspection subcommand. 'forwardOptions'
 -- lets pc's own flags (@-f@, @-o json@, @--no-snapshot@) reach the
@@ -184,7 +184,7 @@ pcPassthroughInfo :: PcVerb -> String -> ParserInfo Command
 pcPassthroughInfo verb desc =
   info
     (PcPassthrough verb <$> many (argument str (metavar "ARGS...")))
-    (progDesc desc <> forwardOptions)
+    (forwardOptions <> progDesc desc)
 
 protectOptsParser :: Parser ProtectOpts
 protectOptsParser =
