@@ -157,7 +157,16 @@ seedPending repo sha logDir recipes nodes =
 --     are exactly the recipes that do real work.
 isPostable :: Map RecipeName Recipe -> NodeId -> Bool
 isPostable _ (SetupNode _) = False
-isPostable recipes (RecipeNode r _) = maybe False hasBody (Map.lookup r recipes)
+isPostable recipes (RecipeNode r _) = case Map.lookup r recipes of
+  Just recipe -> hasBody recipe
+  -- Every 'RecipeNode' in the fanned-out graph originates from the
+  -- recipe map 'buildNodeGraph' returned, so a missing key here is a
+  -- runner-internal contract violation, not a routine "absent"
+  -- condition. Defaulting to 'False' would silently omit the affected
+  -- recipe from the GH check page; a loud error converts the
+  -- programmer mistake into a visible run failure instead. Same
+  -- shape as 'commandForNode's @hostContractError@.
+  Nothing -> error $ "internal error: RecipeNode " <> show r <> " missing from recipe map (buildNodeGraph contract violated)"
 
 -- | Issue one commit-status POST with a caller-supplied description and
 -- log the outcome.
