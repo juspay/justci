@@ -8,7 +8,7 @@
 module Main where
 
 import JustCI.CLI (Args (..), Command (..), parseCli)
-import JustCI.Pipeline (ensureRunDir, runDumpYaml, runGraph, runLocal, runPcPassthrough, runProtect, runStrict)
+import JustCI.Pipeline (RunDir (..), ensureRunDir, resolveRunDir, runDumpYaml, runGraph, runLocal, runPcPassthrough, runProtect, runStrict)
 import System.Environment (lookupEnv)
 import System.Exit (exitWith)
 
@@ -25,5 +25,7 @@ main = do
     Graph -> runGraph
     Protect opts -> runProtect opts
     PcPassthrough verb pcArgs -> do
-      dirs <- ensureRunDir
-      runPcPassthrough verb pcArgs dirs >>= exitWith
+      -- resolveRunDir, not ensureRunDir: the passthrough is read-only,
+      -- shouldn't materialise .ci/ for a checkout that has never run.
+      dirs <- resolveRunDir
+      runPcPassthrough verb pcArgs dirs.sock >>= exitWith

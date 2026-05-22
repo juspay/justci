@@ -301,12 +301,18 @@ runProtect opts = do
       TIO.putStrLn $ "updated required_status_checks on " <> display branch <> " (" <> nCtx <> " contexts)"
 
 -- | Dispatch a live-introspection subcommand (@justci status@ / @logs@ /
--- @monitor@) against the currently-running pipeline. Resolves the socket
--- via the same 'RunDir' the run modes use, then shells out to the baked
--- 'JustCI.ProcessCompose.processComposeBin' so the client version pins
--- to whatever justci itself was built with — agents that pinned a tag
--- of @juspay/justci@ get exactly that pc client talking to exactly that
--- pc server, no nixpkgs-drift skew.
+-- @monitor@) against the currently-running pipeline. Shells out to the
+-- baked 'JustCI.ProcessCompose.processComposeBin' so the client version
+-- pins to whatever justci itself was built with — agents that pinned a
+-- tag of @juspay/justci@ get exactly that pc client talking to exactly
+-- that pc server, no nixpkgs-drift skew.
+--
+-- Takes the socket path directly (not a 'RunDir') because the
+-- read-only client side has no business with the rest of the run-dir
+-- bundle (log file, yaml file, lock file). The caller in @app/Main.hs@
+-- resolves the path via 'resolveRunDir' and passes 'dirs.sock' —
+-- importantly, *without* 'ensureRunDir', so @justci status@ in a fresh
+-- checkout doesn't leave behind an empty @.ci\/@ directory.
 --
 -- The 'doesPathExist' check is a courtesy: it converts the absent-socket
 -- case into a clear "no run in progress" message instead of pc's own
@@ -314,13 +320,13 @@ runProtect opts = do
 -- falls through to pc, which reports its own connect failure — same
 -- failure shape as @ci@'s state-event observer hits in that scenario, so
 -- the error vocabulary is already consistent.
-runPcPassthrough :: PcVerb -> [String] -> RunDir -> IO ExitCode
-runPcPassthrough verb args dirs = do
-  alive <- doesPathExist dirs.sock
+runPcPassthrough :: PcVerb -> [String] -> FilePath -> IO ExitCode
+runPcPassthrough verb args sock = do
+  alive <- doesPathExist sock
   unless alive $
     die $
-      "no justci run in progress in this checkout (no socket at " <> dirs.sock <> ")"
-  runProcessComposeClient dirs.sock (pcVerbArg verb) args
+      "no justci run in progress in this checkout (no socket at " <> sock <> ")"
+  runProcessComposeClient sock (pcVerbArg verb) args
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
