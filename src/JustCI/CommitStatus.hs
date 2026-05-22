@@ -180,7 +180,7 @@ isBodyBearing :: Map RecipeName Recipe -> NodeId -> Bool
 isBodyBearing _ (SetupNode _) = True
 isBodyBearing recipes (RecipeNode r _) = case Map.lookup r recipes of
   Just recipe -> hasBody recipe
-  Nothing -> error $ "internal error: RecipeNode " <> show r <> " missing from recipe map (buildNodeGraph contract violated)"
+  Nothing -> error $ "internal error: RecipeNode " <> T.unpack (display r) <> " missing from recipe map (buildNodeGraph contract violated)"
 
 -- | Issue one commit-status POST with a caller-supplied description and
 -- log the outcome.
