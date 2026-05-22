@@ -1,3 +1,4 @@
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -12,6 +13,8 @@ module JustCI.CLI
   ( -- * Parsed argv
     Args (..),
     Command (..),
+    PcVerb (..),
+    pcVerbArg,
     RunOpts (..),
     ProtectOpts (..),
 
@@ -37,6 +40,7 @@ import Options.Applicative
     defaultPrefs,
     eitherReader,
     execParserPure,
+    forwardOptions,
     fullDesc,
     handleParseResult,
     help,
@@ -46,6 +50,7 @@ import Options.Applicative
     metavar,
     option,
     progDesc,
+    str,
     strOption,
     subparser,
     switch,
@@ -62,12 +67,35 @@ newtype Args = Args {cmd :: Command}
 -- | The parsed subcommand. 'Run' and 'Protect' carry their own option
 -- records; 'DumpYaml' and 'Graph' are pure inspection modes with no
 -- options (the graph is always emitted as Mermaid @flowchart TD@
--- syntax).
+-- syntax); 'PcPassthrough' tags one of three live-introspection verbs
+-- and carries the user-supplied tail to forward to @process-compose@.
 data Command
   = Run RunOpts
   | DumpYaml
   | Graph
   | Protect ProtectOpts
+  | PcPassthrough PcVerb [String]
+
+-- | The three live-introspection subcommands all share one implementation
+-- — shell out to the baked @process-compose@ binary against the running
+-- pipeline's UDS. This tag picks which @process \<verb\>@ to forward.
+--
+-- Phrased as a sum (rather than three top-level 'Command' constructors)
+-- so the dispatch arm in @app/Main.hs@ is a single case branch and the
+-- pc-verb mapping lives in exactly one place ('pcVerbArg'). Adding a
+-- fourth live verb later is a one-line constructor + one-line mapping.
+data PcVerb = PcStatus | PcLogs | PcMonitor
+  deriving stock (Eq, Show)
+
+-- | Map a justci-facing 'PcVerb' to the @process-compose process \<verb\>@
+-- token. The one rename — 'PcStatus' → @"list"@ — gives the user-facing
+-- subcommand a clearer name (@justci status@ matches @git status@ /
+-- @systemctl status@ idiom) without dragging pc's slightly-awkward
+-- @"list"@ noun into the justci CLI surface.
+pcVerbArg :: PcVerb -> String
+pcVerbArg PcStatus = "list"
+pcVerbArg PcLogs = "logs"
+pcVerbArg PcMonitor = "monitor"
 
 -- | Options that only apply to @justci protect@.
 --
@@ -142,8 +170,21 @@ commandParser =
         <> O.command "dump-yaml" (info (pure DumpYaml) (progDesc "Print the process-compose YAML to stdout"))
         <> O.command "graph" (info (pure Graph) (progDesc "Print the process dependency graph in Mermaid flowchart syntax"))
         <> O.command "protect" (info (Protect <$> protectOptsParser) (progDesc "Set GitHub branch-protection required_status_checks to the (recipe, platform) contexts the canonical DAG produces."))
+        <> O.command "status" (pcPassthroughInfo PcStatus "Snapshot every node's state in the running pipeline. Forwards to `process-compose process list` against $PWD/.ci/pc.sock. Pass `-o json` for jq-able output; other flags pass through verbatim.")
+        <> O.command "logs" (pcPassthroughInfo PcLogs "Tail or follow one node's logs in the running pipeline. Positional argument is the process name (`<recipe>@<platform>`); `-f` follows. Forwards to `process-compose process logs`.")
+        <> O.command "monitor" (pcPassthroughInfo PcMonitor "Live state-transition stream for every node in the running pipeline. Forwards to `process-compose process monitor`. Pass `-o json` for one JSON event per line.")
     )
-    <|> (Run <$> runOptsParser)
+    <|> Run <$> runOptsParser
+
+-- | 'ParserInfo' for a live-introspection subcommand. 'forwardOptions'
+-- lets pc's own flags (@-f@, @-o json@, @--no-snapshot@) reach the
+-- subprocess without justci having to re-declare them; 'many str'
+-- collects positionals (process names) plus any forwarded flags.
+pcPassthroughInfo :: PcVerb -> String -> ParserInfo Command
+pcPassthroughInfo verb desc =
+  info
+    (PcPassthrough verb <$> many (argument str (metavar "ARGS...")))
+    (forwardOptions <> progDesc desc)
 
 protectOptsParser :: Parser ProtectOpts
 protectOptsParser =

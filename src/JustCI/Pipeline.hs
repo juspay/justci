@@ -14,6 +14,7 @@
 module JustCI.Pipeline
   ( -- * Runtime artifact layout
     RunDir (..),
+    resolveRunDir,
     ensureRunDir,
 
     -- * Run modes
@@ -22,6 +23,7 @@ module JustCI.Pipeline
     runGraph,
     runDumpYaml,
     runProtect,
+    runPcPassthrough,
 
     -- * Pipeline assembly
     RunMode (..),
@@ -44,7 +46,7 @@ import Data.Text.Display (Display (..), display)
 import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
-import JustCI.CLI (ProtectOpts (..), RunOpts (..))
+import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
 import JustCI.CommitStatus (contextForNode, isUserVisible, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
@@ -56,14 +58,14 @@ import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
 import JustCI.Node (DagSelection (..), NodeId (..), defaultDagSelection, nodePlatform, parseNodeId, toMermaid)
 import JustCI.Platform (Platform, localPlatform)
-import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, toProcessCompose)
+import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, runProcessComposeClient, toProcessCompose)
 import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
 import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile)
-import System.Exit (die)
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
+import System.Exit (ExitCode, die)
+import System.FilePath (takeDirectory, (</>))
 import System.IO (IOMode (..), withFile)
 import System.IO.Error (isDoesNotExistError)
 
@@ -79,14 +81,19 @@ data RunDir = RunDir
     lock :: FilePath
   }
 
--- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
--- Everything we write at runtime lives here so the user gitignores
--- @\/.ci\/@ once and forgets about it.
-ensureRunDir :: IO RunDir
-ensureRunDir = do
+-- | Compute the canonical @\$PWD\/.ci\/@ sub-paths without touching the
+-- filesystem. Used by read-only client subcommands ('runPcPassthrough'
+-- against a live socket) that must not silently create @.ci\/@ on disk
+-- in checkouts that have never run a pipeline. 'ensureRunDir' is the
+-- write-mode wrapper that calls this then creates the directory.
+--
+-- Single source of truth for the artifact layout: future changes to the
+-- @.ci\/@ shape (e.g. moving to @\$XDG_RUNTIME_DIR\/justci\/@) edit only
+-- this function — 'ensureRunDir' inherits via composition.
+resolveRunDir :: IO RunDir
+resolveRunDir = do
   cwd <- getCurrentDirectory
   let dir = cwd </> ".ci"
-  createDirectoryIfMissing True dir
   pure
     RunDir
       { worktreePath = dir </> "worktree",
@@ -95,6 +102,17 @@ ensureRunDir = do
         pcYaml = dir </> "pc.yaml",
         lock = dir </> "lock"
       }
+
+-- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
+-- Everything we write at runtime lives here so the user gitignores
+-- @\/.ci\/@ once and forgets about it. Composes 'resolveRunDir' (paths)
+-- with 'createDirectoryIfMissing' (creation) so the layout is not
+-- duplicated across the read-only and write modes.
+ensureRunDir :: IO RunDir
+ensureRunDir = do
+  dirs <- resolveRunDir
+  createDirectoryIfMissing True (takeDirectory dirs.sock)
+  pure dirs
 
 -- | Take an exclusive kernel file lock on @lockPath@, unlink any stale
 -- @sockFile@ left behind by a crashed prior run, and run @action@. The
@@ -281,6 +299,34 @@ runProtect opts = do
         Nothing -> dieOnLeft =<< viewDefaultBranch
       dieOnLeft =<< setRequiredChecks repo branch contexts
       TIO.putStrLn $ "updated required_status_checks on " <> display branch <> " (" <> nCtx <> " contexts)"
+
+-- | Dispatch a live-introspection subcommand (@justci status@ / @logs@ /
+-- @monitor@) against the currently-running pipeline. Shells out to the
+-- baked 'JustCI.ProcessCompose.processComposeBin' so the client version
+-- pins to whatever justci itself was built with — agents that pinned a
+-- tag of @juspay/justci@ get exactly that pc client talking to exactly
+-- that pc server, no nixpkgs-drift skew.
+--
+-- Takes the socket path directly (not a 'RunDir') because the
+-- read-only client side has no business with the rest of the run-dir
+-- bundle (log file, yaml file, lock file). The caller in @app/Main.hs@
+-- resolves the path via 'resolveRunDir' and passes 'dirs.sock' —
+-- importantly, *without* 'ensureRunDir', so @justci status@ in a fresh
+-- checkout doesn't leave behind an empty @.ci\/@ directory.
+--
+-- The 'doesPathExist' check is a courtesy: it converts the absent-socket
+-- case into a clear "no run in progress" message instead of pc's own
+-- @"connection refused"@. A stale socket (file present, pc dead) still
+-- falls through to pc, which reports its own connect failure — same
+-- failure shape as @ci@'s state-event observer hits in that scenario, so
+-- the error vocabulary is already consistent.
+runPcPassthrough :: PcVerb -> [String] -> FilePath -> IO ExitCode
+runPcPassthrough verb args sock = do
+  alive <- doesPathExist sock
+  unless alive $
+    die $
+      "no justci run in progress in this checkout (no socket at " <> sock <> ")"
+  runProcessComposeClient sock (pcVerbArg verb) args
 
 -- | Materialise every @.ci\/\<sha\>\/\<platform\>\/@ subdirectory the
 -- pipeline will route logs to, before process-compose spawns. pc
