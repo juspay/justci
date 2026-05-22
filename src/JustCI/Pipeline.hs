@@ -47,7 +47,7 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
-import JustCI.CommitStatus (contextForNode, isPostable, newTimings, postStatusFor, seedPending)
+import JustCI.CommitStatus (contextForNode, isBodyBearing, isPostable, newTimings, postStatusFor, seedPending)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
@@ -172,9 +172,8 @@ withCiLock lockPath sockFile action =
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  -- Local mode doesn't post GH statuses, so the recipe map isn't needed here.
-  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
-  outcomes <- newOutcomes (processNames pc)
+  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
+  outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
     void $
@@ -219,7 +218,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     seedPending repo sha logDir recipes nodes
-    outcomes <- newOutcomes nodes
+    outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
     timings <- newTimings
     let onState ps = withParsedNode ps $ \node ->
           postStatusFor timings repo sha logDir recipes node ps

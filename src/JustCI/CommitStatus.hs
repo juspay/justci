@@ -39,6 +39,7 @@ module JustCI.CommitStatus
     -- * Naming convention
     contextForNode,
     isPostable,
+    isBodyBearing,
 
     -- * === Internal (test surface) ===
     terminalToCommitStatus,
@@ -157,15 +158,28 @@ seedPending repo sha logDir recipes nodes =
 --     are exactly the recipes that do real work.
 isPostable :: Map RecipeName Recipe -> NodeId -> Bool
 isPostable _ (SetupNode _) = False
-isPostable recipes (RecipeNode r _) = case Map.lookup r recipes of
+isPostable recipes n@(RecipeNode _ _) = isBodyBearing recipes n
+
+-- | Whether @node@ is body-bearing — the narrower axis 'isPostable'
+-- delegates its recipe-side check to. Vacuously 'True' for
+-- 'SetupNode' (it isn't a recipe, so the axis doesn't apply); for
+-- 'RecipeNode' it looks the recipe up in @recipes@ and asks 'hasBody'.
+-- Exists alongside 'isPostable' so the local verdict surface
+-- ('JustCI.Verdict.verdictSummary'), which keeps 'SetupNode's in its
+-- dedicated @Setup@ section but wants the same aggregator drop as
+-- the GH surface, can seed its outcomes map by this predicate. The
+-- 'SetupNode' clause's 'True' is the right vacuous value because
+-- callers that want to exclude setup nodes (i.e. 'isPostable')
+-- handle that case structurally before delegating here.
+--
+-- Like 'isPostable', a missing 'RecipeName' is a runner-internal
+-- contract violation, not a routine absent condition — every
+-- 'RecipeNode' in the fanned graph originates from the recipe map
+-- 'JustCI.Pipeline.buildNodeGraph' returned.
+isBodyBearing :: Map RecipeName Recipe -> NodeId -> Bool
+isBodyBearing _ (SetupNode _) = True
+isBodyBearing recipes (RecipeNode r _) = case Map.lookup r recipes of
   Just recipe -> hasBody recipe
-  -- Every 'RecipeNode' in the fanned-out graph originates from the
-  -- recipe map 'buildNodeGraph' returned, so a missing key here is a
-  -- runner-internal contract violation, not a routine "absent"
-  -- condition. Defaulting to 'False' would silently omit the affected
-  -- recipe from the GH check page; a loud error converts the
-  -- programmer mistake into a visible run failure instead. Same
-  -- shape as 'commandForNode's @hostContractError@.
   Nothing -> error $ "internal error: RecipeNode " <> show r <> " missing from recipe map (buildNodeGraph contract violated)"
 
 -- | Issue one commit-status POST with a caller-supplied description and
