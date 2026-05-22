@@ -14,6 +14,7 @@
 module JustCI.Pipeline
   ( -- * Runtime artifact layout
     RunDir (..),
+    resolveRunDir,
     ensureRunDir,
 
     -- * Run modes
@@ -64,7 +65,7 @@ import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
 import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
 import System.Exit (ExitCode, die)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO (IOMode (..), withFile)
 import System.IO.Error (isDoesNotExistError)
 
@@ -80,14 +81,19 @@ data RunDir = RunDir
     lock :: FilePath
   }
 
--- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
--- Everything we write at runtime lives here so the user gitignores
--- @\/.ci\/@ once and forgets about it.
-ensureRunDir :: IO RunDir
-ensureRunDir = do
+-- | Compute the canonical @\$PWD\/.ci\/@ sub-paths without touching the
+-- filesystem. Used by read-only client subcommands ('runPcPassthrough'
+-- against a live socket) that must not silently create @.ci\/@ on disk
+-- in checkouts that have never run a pipeline. 'ensureRunDir' is the
+-- write-mode wrapper that calls this then creates the directory.
+--
+-- Single source of truth for the artifact layout: future changes to the
+-- @.ci\/@ shape (e.g. moving to @\$XDG_RUNTIME_DIR\/justci\/@) edit only
+-- this function — 'ensureRunDir' inherits via composition.
+resolveRunDir :: IO RunDir
+resolveRunDir = do
   cwd <- getCurrentDirectory
   let dir = cwd </> ".ci"
-  createDirectoryIfMissing True dir
   pure
     RunDir
       { worktreePath = dir </> "worktree",
@@ -96,6 +102,17 @@ ensureRunDir = do
         pcYaml = dir </> "pc.yaml",
         lock = dir </> "lock"
       }
+
+-- | Create @\$PWD\/.ci\/@ (if missing) and return the canonical sub-paths.
+-- Everything we write at runtime lives here so the user gitignores
+-- @\/.ci\/@ once and forgets about it. Composes 'resolveRunDir' (paths)
+-- with 'createDirectoryIfMissing' (creation) so the layout is not
+-- duplicated across the read-only and write modes.
+ensureRunDir :: IO RunDir
+ensureRunDir = do
+  dirs <- resolveRunDir
+  createDirectoryIfMissing True (takeDirectory dirs.sock)
+  pure dirs
 
 -- | Take an exclusive kernel file lock on @lockPath@, unlink any stale
 -- @sockFile@ left behind by a crashed prior run, and run @action@. The
