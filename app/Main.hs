@@ -28,4 +28,4 @@ main = do
       -- resolveRunDir, not ensureRunDir: the passthrough is read-only,
       -- shouldn't materialise .ci/ for a checkout that has never run.
       dirs <- resolveRunDir
-      runPcPassthrough verb pcArgs dirs.sock >>= exitWith
+      exitWith =<< runPcPassthrough verb pcArgs dirs.sock
