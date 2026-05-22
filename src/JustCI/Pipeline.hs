@@ -471,11 +471,11 @@ instance Display BuildGraphError where
 -- Returns the filtered fanned-out graph, the local platform, and the
 -- full justfile recipe map (keyed by 'RecipeName'). The platform is
 -- needed downstream for transport selection ('commandForNode'); the
--- recipe map is needed by 'isBodyBearing' so the GH-status and
--- branch-protection filters can drop pure aggregators. Both are
--- computed here anyway as part of fanout — exposing them avoids
--- shelling out to @just --dump@ a second time and avoids the dormant
--- divergence risk of two parses going out of sync mid-run.
+-- recipe map is needed by 'JustCI.CommitStatus.isPostable' so the
+-- GH-status and branch-protection filters can drop pure aggregators.
+-- Both are computed here anyway as part of fanout — exposing them
+-- avoids shelling out to @just --dump@ a second time and avoids the
+-- dormant divergence risk of two parses going out of sync mid-run.
 buildNodeGraph :: Hosts -> DagSelection -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform, Map.Map RecipeName Recipe))
 buildNodeGraph hosts sel = do
   recipes <- dieOnLeft =<< fetchDump
