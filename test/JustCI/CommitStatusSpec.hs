@@ -9,9 +9,13 @@
 -- description field embeds.
 module JustCI.CommitStatusSpec (spec) where
 
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import JustCI.CommitStatus (describePost, formatElapsed)
+import JustCI.CommitStatus (describePost, formatElapsed, isBodyBearing, isPostable)
 import JustCI.Gh (CommitStatus (..))
+import JustCI.Justfile (Recipe (..))
+import JustCI.Node (NodeId (..))
+import JustCI.Platform (Platform (..))
 import JustCI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..))
 import Test.Hspec
 
@@ -79,3 +83,36 @@ spec = do
         `shouldBe` Just (Failure, "Skipped (upstream failed)")
       describePost (ps PsErrored 0) (Just 99) logP
         `shouldBe` Just (Failure, "Errored (did not start)")
+
+  -- Pair of NodeId filters serving the GH-status surface and the
+  -- local verdict-summary surface respectively. Both consult the
+  -- recipe map; they differ only on whether SetupNodes pass.
+  describe "isPostable / isBodyBearing" $ do
+    let mkRecipe nm bdy = Recipe {namepath = nm, dependencies = [], parameters = [], attributes = [], body = bdy}
+        recipes =
+          Map.fromList
+            [ ("work", mkRecipe "work" [["echo hi"]]),
+              ("agg", mkRecipe "agg" [])
+            ]
+        workNode = RecipeNode "work" X86_64Linux
+        aggNode = RecipeNode "agg" X86_64Linux
+        setupNode = SetupNode X86_64Linux
+
+    it "isPostable keeps body-bearing recipe nodes" $
+      isPostable recipes workNode `shouldBe` True
+
+    it "isPostable drops pure-aggregator recipe nodes" $
+      isPostable recipes aggNode `shouldBe` False
+
+    it "isPostable drops setup nodes (internal plumbing)" $
+      isPostable recipes setupNode `shouldBe` False
+
+    it "isBodyBearing matches isPostable on the two recipe-node cases" $ do
+      isBodyBearing recipes workNode `shouldBe` True
+      isBodyBearing recipes aggNode `shouldBe` False
+
+    it "isBodyBearing keeps setup nodes — they pass the body axis vacuously" $
+      -- The verdict surface keeps SetupNodes (they're rendered in their
+      -- own Setup section); isBodyBearing's vacuous True for them is
+      -- what lets the same predicate seed the verdict outcomes map.
+      isBodyBearing recipes setupNode `shouldBe` True
