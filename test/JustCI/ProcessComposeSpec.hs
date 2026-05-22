@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Tests for "JustCI.ProcessCompose"'s YAML emission, focused on the
--- per-process @log_location@ knob: it must round-trip into the YAML
--- when the caller supplies one and stay absent when the caller doesn't
--- (so @dump-yaml@ and local-mode runs are byte-identical to the
--- pre-feature output).
+-- | Tests for "JustCI.ProcessCompose": the argv shape produced by
+-- 'pcClientArgs' (pinned here so a mis-order surfaces as a test failure
+-- rather than a mystery flag error at runtime) and the YAML emission
+-- from 'toProcessCompose' (covering @log_location@, process keying, and
+-- cross-platform fanout wiring).
 module JustCI.ProcessComposeSpec (spec) where
 
 import qualified Algebra.Graph.AdjacencyMap as G
