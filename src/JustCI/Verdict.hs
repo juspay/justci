@@ -250,13 +250,18 @@ verdictSummary mkHost outcomes =
     renderOutcome Nothing = "did not run"
 
     -- Bottom-line tally counts every scheduled node (setup + recipes)
-    -- that didn't reach 'Just Succeeded'.
+    -- that didn't reach 'Just Succeeded' — i.e. 'Just Failed',
+    -- 'Just Skipped', or 'Nothing' (no terminal event). The three
+    -- cases render distinctly per-recipe ("failed" / "skipped" /
+    -- "did not run") but collapse into one count here because the
+    -- bottom-line message ("N of M nodes did not succeed") is
+    -- itself the union over them.
     totalCount = Map.size outcomes
-    failedCount = Map.size (Map.filter (/= Just Succeeded) outcomes)
+    notSucceededCount = Map.size (Map.filter (/= Just Succeeded) outcomes)
     verdictLine
-      | failedCount == 0 = "all " <> tshow totalCount <> " nodes succeeded"
+      | notSucceededCount == 0 = "all " <> tshow totalCount <> " nodes succeeded"
       | otherwise =
-          tshow failedCount
+          tshow notSucceededCount
             <> " of "
             <> tshow totalCount
             <> " nodes did not succeed"
