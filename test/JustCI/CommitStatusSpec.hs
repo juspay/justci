@@ -4,14 +4,15 @@
 -- 'formatElapsed' (human-readable durations) and 'describePost'
 -- (the wire-status → @(commit-status, description)@ classifier the
 -- per-event poster routes through). The actual posting path
--- ('postStatusFor', 'seedPending') talks to the GitHub API and isn't
--- exercised here; this spec locks down the pure formatting that the
--- description field embeds.
+-- ('postStatusFor') talks to the GitHub API and isn't exercised
+-- here; this spec locks down the pure formatting that the
+-- description field embeds and the two policy predicates that
+-- decide which nodes flow through it.
 module JustCI.CommitStatusSpec (spec) where
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import JustCI.CommitStatus (describePost, formatElapsed, isBodyBearing, isPostable)
+import JustCI.CommitStatus (describePost, formatElapsed, isBodyBearing, isRequiredCheck, shouldPostStatus)
 import JustCI.Gh (CommitStatus (..))
 import JustCI.Justfile (Recipe (..))
 import JustCI.Node (NodeId (..))
@@ -65,16 +66,19 @@ spec = do
       describePost (ps PsCompleted 1) (Just 5) logP
         `shouldBe` Just (Failure, "Failed (5s): " <> logPT)
 
-    it "posts Pending with a path-free 'Skipped' for PsSkipped" $
+    it "drops PsSkipped events (no post — defers to branch-protection placeholder)" $
       -- Cascade case: this recipe never ran because an upstream dep
-      -- failed. Posting @Pending@ (not @Failure@) keeps the PR-side
-      -- presentation honest — we have no evidence about this recipe
-      -- itself, so it stays "not yet met" instead of being painted
-      -- red. Regression for issue #26: previously this embedded the
-      -- recipe's log path even though the recipe never ran and the
-      -- file never existed on disk.
-      describePost (ps PsSkipped 0) Nothing logP
-        `shouldBe` Just (Pending, "Skipped")
+      -- failed. We do not post; GitHub's own "Expected — Waiting for
+      -- status to be reported" placeholder (driven by the
+      -- required-checks list 'runProtect' configured) is what keeps
+      -- the row visible and the merge gate closed. Posting our own
+      -- @Pending@+@"Skipped"@ row would overwrite a prior @Success@
+      -- on a partial re-run, since pc re-emits PsSkipped for
+      -- downstreams of any re-running failed leaf.
+      describePost (ps PsSkipped 0) Nothing logP `shouldBe` Nothing
+
+    it "drops PsSkipped even when an elapsed value is supplied" $
+      describePost (ps PsSkipped 0) (Just 99) logP `shouldBe` Nothing
 
     it "posts Failure with a path-free 'Errored (did not start)' for PsErrored" $
       -- Launch failure (pc tried to start the process and couldn't) —
@@ -84,18 +88,19 @@ spec = do
       describePost (ps PsErrored 0) Nothing logP
         `shouldBe` Just (Failure, "Errored (did not start)")
 
-    it "omits the elapsed suffix from skipped/errored posts (recipe never ran)" $ do
+    it "omits the elapsed suffix from errored posts (recipe never ran)" $
       -- Even if the caller passes an elapsed value, did-not-run states
       -- suppress it — there's no meaningful runtime to report.
-      describePost (ps PsSkipped 0) (Just 99) logP
-        `shouldBe` Just (Pending, "Skipped")
       describePost (ps PsErrored 0) (Just 99) logP
         `shouldBe` Just (Failure, "Errored (did not start)")
 
-  -- Pair of NodeId filters serving the GH-status surface and the
-  -- local verdict-summary surface respectively. Both consult the
-  -- recipe map; they differ only on whether SetupNodes pass.
-  describe "isPostable / isBodyBearing" $ do
+  -- Two policy predicates with distinct meanings, plus the shared
+  -- body-axis helper. The pair (shouldPostStatus, isRequiredCheck)
+  -- differs only on setup nodes — setup nodes /post/ statuses (so a
+  -- setup failure shows up on the PR) but are /not/ required checks
+  -- (local-only runs would otherwise block merge on a row that was
+  -- never scheduled).
+  describe "policy predicates" $ do
     let mkRecipe nm bdy = Recipe {namepath = nm, dependencies = [], parameters = [], attributes = [], body = bdy}
         recipes =
           Map.fromList
@@ -106,16 +111,29 @@ spec = do
         aggNode = RecipeNode "agg" X86_64Linux
         setupNode = SetupNode X86_64Linux
 
-    it "isPostable keeps body-bearing recipe nodes" $
-      isPostable recipes workNode `shouldBe` True
+    it "shouldPostStatus keeps body-bearing recipe nodes" $
+      shouldPostStatus recipes workNode `shouldBe` True
 
-    it "isPostable drops pure-aggregator recipe nodes" $
-      isPostable recipes aggNode `shouldBe` False
+    it "shouldPostStatus drops pure-aggregator recipe nodes" $
+      shouldPostStatus recipes aggNode `shouldBe` False
 
-    it "isPostable drops setup nodes (internal plumbing)" $
-      isPostable recipes setupNode `shouldBe` False
+    it "shouldPostStatus keeps setup nodes — failures surface on the PR" $
+      shouldPostStatus recipes setupNode `shouldBe` True
 
-    it "isBodyBearing matches isPostable on the two recipe-node cases" $ do
+    it "isRequiredCheck keeps body-bearing recipe nodes" $
+      isRequiredCheck recipes workNode `shouldBe` True
+
+    it "isRequiredCheck drops pure-aggregator recipe nodes" $
+      isRequiredCheck recipes aggNode `shouldBe` False
+
+    it "isRequiredCheck drops setup nodes — local-only runs never schedule them" $
+      -- The asymmetry against shouldPostStatus: if setup were a
+      -- required check, a local-only run (no remote platforms, no
+      -- SetupNode in the graph) would permanently block merge on a
+      -- row that never received a status.
+      isRequiredCheck recipes setupNode `shouldBe` False
+
+    it "isBodyBearing matches isRequiredCheck on the two recipe-node cases" $ do
       isBodyBearing recipes workNode `shouldBe` True
       isBodyBearing recipes aggNode `shouldBe` False
 

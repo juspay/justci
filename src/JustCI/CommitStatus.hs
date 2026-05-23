@@ -6,34 +6,42 @@
 --
 --   * The context-name convention (@\<recipe\>\@\<platform\>@,
 --     derived from 'NodeId').
---   * The @startup → terminal@ state transitions —
---     'seedPending' fans out @Pending@ posts at the top of a run so
---     every expected check appears at once, and 'postStatusFor'
---     translates each in-flight 'ProcessState' event into the
---     matching @Pending@ / @Success@ / @Failure@ update. Cascade
---     skips stay at @Pending@ but flip their description to
---     @"Skipped"@.
---   * The setup-node filter — internal plumbing nodes ('SetupNode')
---     are excluded from both the seed and the per-event posts via a
---     pattern match on 'NodeId', matching the same filter
---     'JustCI.Verdict.verdictSummary' applies so the PR checks page and
---     the local CLI summary agree on what counts as user-facing.
+--   * The @running → terminal@ state transitions — 'postStatusFor'
+--     translates each 'ProcessState' event into the matching
+--     @Pending@ / @Success@ / @Failure@ post. The first @Pending@
+--     for a node fires on its @PsRunning@ transition, /just prior
+--     to/ the step actually running — there is no pre-run seed.
+--     Cascade-skipped nodes ('PsSkipped') don't post anything; their
+--     required-check row is supplied by GitHub's own
+--     "Expected — Waiting for status to be reported" placeholder
+--     (driven by 'JustCI.Pipeline.runProtect's required-checks list),
+--     which is the canonical encapsulation of "required but
+--     unreported." Clearing the gate requires re-running the failed
+--     root, not the skipped recipe itself.
+--   * Two predicates with distinct policy meanings:
+--     'shouldPostStatus' (does this node emit a commit status?) —
+--     true for setup nodes too, so a setup failure surfaces as a
+--     red row instead of leaving the user staring at a wall of
+--     "Expected — Waiting" downstream; and 'isRequiredCheck' (does
+--     this node belong on the branch-protection required list?) —
+--     false for setup, so local-only runs don't permanently block
+--     merge on a setup row that was never scheduled.
 --   * The human-readable description per state (suffixed with the
 --     log path so the GitHub UI carries a navigable pointer).
 --   * 'terminalToCommitStatus' — the wire-side half of the
 --     cross-module agreement with 'JustCI.Verdict.terminalToOutcome'.
 --     Both consumers of 'TerminalStatus' project from this one
---     mapping, so every wire-classified terminal state has exactly
---     one GH 'CommitStatus' and one local 'RecipeOutcome' — the GH
---     check page and the local verdict summary cannot disagree on
---     what counts as success, failure, or skipped.
+--     mapping. Note that 'describePost' no longer reaches the
+--     @TsSkipped@ arm — the @PsSkipped → Nothing@ short-circuit
+--     above handles that case before the seam — so the projection is
+--     kept for the cross-module agreement contract, not for any
+--     live posting path.
 --
 -- The endpoint URL, the wire encoding of each state, and the
 -- form-field names are gh-API details owned by "JustCI.Gh".
 module JustCI.CommitStatus
   ( -- * Posting
     postStatusFor,
-    seedPending,
 
     -- * Per-node timing
     Timings,
@@ -41,7 +49,8 @@ module JustCI.CommitStatus
 
     -- * Naming convention
     contextForNode,
-    isPostable,
+    shouldPostStatus,
+    isRequiredCheck,
     isBodyBearing,
 
     -- * === Internal (test surface) ===
@@ -59,7 +68,6 @@ module JustCI.CommitStatus
   )
 where
 
-import Control.Concurrent.Async (forConcurrently_)
 import Control.Monad (when)
 import Data.Foldable (for_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -80,7 +88,8 @@ import System.IO (hPutStrLn, stderr)
 -- | Given a process-compose state event for an already-parsed
 -- 'NodeId', post the corresponding GitHub commit status under the
 -- @\<recipe\>\@\<platform\>@ context. Non-terminal states ('PsOther')
--- drop on the floor.
+-- and cascade-skipped events ('PsSkipped') drop on the floor — see
+-- 'describePost' for the per-status routing.
 --
 -- The caller ('JustCI.Pipeline') has the single 'parseNodeId' site, so
 -- "is this event for a node we scheduled?" is decided once, not
@@ -91,13 +100,10 @@ import System.IO (hPutStrLn, stderr)
 -- GitHub UI carries a navigable pointer to the failing output. The
 -- same path is set as the process's @log_location@ in the
 -- process-compose YAML, so the file on disk and the path in the
--- status agree by construction. The two did-not-run terminal states
--- ('PsSkipped', 'PsErrored') suppress the path — those nodes never
--- wrote a log file, and a pointer to a missing file made every
--- cascaded check after a failed setup misleading (issue #26). The
--- two also differ in state: 'PsSkipped' posts @Pending@+@"Skipped"@
--- (cascade, not this recipe's fault); 'PsErrored' posts
--- @Failure@+@"Errored (did not start)"@ (this recipe's launch broke).
+-- status agree by construction. 'PsErrored' (launch failure)
+-- suppresses the path — those nodes never wrote a log file, and a
+-- pointer to a missing file is worse than no pointer (issue #26) —
+-- and posts @Failure@+@"Errored (did not start)"@.
 --
 -- Synchronous: each post blocks the subscription loop in
 -- 'JustCI.ProcessCompose.Events.subscribeStates' until @gh api@ returns. This
@@ -113,77 +119,77 @@ import System.IO (hPutStrLn, stderr)
 -- status post succeeded.
 postStatusFor :: Timings -> Repo -> Sha -> FilePath -> Map RecipeName Recipe -> NodeId -> ProcessState -> IO ()
 postStatusFor timings repo sha logDir recipes node ps
-  | not (isPostable recipes node) = pure ()
+  | not (shouldPostStatus recipes node) = pure ()
   | otherwise = do
       when (ps.status == PsRunning) (markStart timings node)
       mElapsed <- elapsedSince timings node
       for_ (describePost ps mElapsed (logPathFor logDir node)) $ \(cs, desc) ->
         postOne repo sha node cs desc
 
--- | Pre-seed every node with a 'Pending' commit status at startup —
--- one parallel @gh api@ POST per node, all joined before this returns.
--- The PR's checks panel shows the full set of expected checks the moment
--- the pipeline begins, instead of materializing them one at a time as
--- nodes start. Skipped nodes (whose upstream dep failed) keep their
--- @pending@ — 'postStatusFor' overwrites only the description to
--- @"Skipped"@ when the cascade fires. Nodes that never produce any
--- event at all stay at @pending@+@"Queued: …"@, which surfaces as a
--- visible "why is this still pending?" signal rather than silent
--- absence.
+-- | Does this node emit a GitHub commit status as it transitions
+-- through process-compose states? True for body-bearing recipe nodes
+-- /and/ for setup nodes — the latter so that a remote-platform setup
+-- failure (bundle ship, drv copy, SSH plumbing) surfaces as one
+-- visible @ci::_ci-setup@\<platform\>@ row instead of leaving the user
+-- staring at a wall of "Expected — Waiting" on downstream recipes
+-- with no posted cause.
 --
--- GitHub has no batch endpoint for commit statuses
--- (see <https://docs.github.com/en/rest/commits/statuses>), so this is
--- N parallel single-status POSTs. 'forConcurrently_' joins all of them
--- before returning, so the caller can rely on every seed being in place
--- before the pipeline kicks off.
-seedPending :: Repo -> Sha -> FilePath -> Map RecipeName Recipe -> [NodeId] -> IO ()
-seedPending repo sha logDir recipes nodes =
-  forConcurrently_ (filter (isPostable recipes) nodes) $ \n ->
-    postOne repo sha n Pending $ seedDescription $ logPathFor logDir n
+-- Distinct from 'isRequiredCheck': setup nodes are posted but never
+-- required-merge-blocking. Local-only runs (no remote platforms) do
+-- not schedule any 'SetupNode', so registering one as a required
+-- check would permanently block merge on a row that was never going
+-- to receive a status — see 'isRequiredCheck' for the matching
+-- exclusion.
+--
+-- Pure-aggregator recipes (empty 'hasBody', e.g. @default: checks
+-- run-check@) are excluded on a different axis: their state is fully
+-- derivative of their leaves, so a check posted for them is a
+-- denormalised duplicate. The wedge case is downstream retries —
+-- re-running a single failed leaf overwrites the leaf's check to
+-- green, but the aggregator was never tied to a re-runnable process,
+-- so it'd stick at its prior state and lie about reality.
+shouldPostStatus :: Map RecipeName Recipe -> NodeId -> Bool
+shouldPostStatus _ (SetupNode _) = True
+shouldPostStatus recipes n@(RecipeNode _ _) = isBodyBearing recipes n
 
--- | Whether a 'NodeId' belongs on the PR's user-facing checks page.
--- The single source of truth for "post a GH commit status for this
--- node?", consumed by both 'seedPending' and 'postStatusFor' and by
--- 'JustCI.Pipeline.runProtect' when assembling the branch-protection
--- required-checks list.
+-- | Does this node belong on the branch-protection required-checks
+-- list assembled by 'JustCI.Pipeline.runProtect'? True for body-bearing
+-- recipes only.
 --
--- Two axes of exclusion, both rejected:
+-- Setup nodes are excluded for liveness: a remote-platform setup is
+-- internal plumbing, not user work, and a recipe whose setup is
+-- handled implicitly (the local platform) has no 'SetupNode' in the
+-- graph at all. Requiring @_ci-setup@\<platform\>@ as a check would
+-- mean local-only runs permanently block merge on a row that was
+-- never scheduled.
 --
---   * @SetupNode@s — internal plumbing (bundle ship, drv copy) that
---     never represented user work in the first place; structurally
---     unfit for a PR-visible check.
---
---   * @RecipeNode@s whose 'Recipe' has an empty 'hasBody' — pure
---     dependency aggregators (e.g. @default: checks run-check@). Their
---     state is fully derivative of their leaves, so a check posted for
---     them is a denormalised duplicate that diverges from reality the
---     moment a downstream leaf is retried individually. The retry
---     overwrites the leaf's check to green but the aggregator's
---     skipped post (now @Pending@+@"Skipped"@) was never tied to a
---     re-runnable process, so it sticks at @pending@ and the PR
---     still can't merge because a required @pending@ check is
---     "not yet met". Removing aggregators from the surface entirely
---     means the required checks are exactly the recipes that do
---     real work.
-isPostable :: Map RecipeName Recipe -> NodeId -> Bool
-isPostable _ (SetupNode _) = False
-isPostable recipes n@(RecipeNode _ _) = isBodyBearing recipes n
+-- For cascade-skipped recipes, the required-check row is supplied
+-- by GitHub's own "Expected — Waiting for status to be reported"
+-- placeholder once branch protection is configured — that's the
+-- canonical encapsulation of "required but unreported", and
+-- 'describePost' returning 'Nothing' on 'PsSkipped' is what defers
+-- to it instead of fabricating a parallel @Pending@+@"Skipped"@
+-- post. Clearing the gate requires re-running the failed root.
+isRequiredCheck :: Map RecipeName Recipe -> NodeId -> Bool
+isRequiredCheck _ (SetupNode _) = False
+isRequiredCheck recipes n@(RecipeNode _ _) = isBodyBearing recipes n
 
--- | Whether @node@ is body-bearing — the narrower axis 'isPostable'
--- delegates its recipe-side check to. Vacuously 'True' for
--- 'SetupNode' (it isn't a recipe, so the axis doesn't apply); for
--- 'RecipeNode' it looks the recipe up in @recipes@ and asks 'hasBody'.
--- Exists alongside 'isPostable' so the local verdict surface
+-- | Whether @node@ is body-bearing — the narrower axis the
+-- recipe-side cases of 'shouldPostStatus' and 'isRequiredCheck'
+-- delegate to. Vacuously 'True' for 'SetupNode' (it isn't a recipe,
+-- so the axis doesn't apply); for 'RecipeNode' it looks the recipe
+-- up in @recipes@ and asks 'hasBody'. Exists alongside the policy
+-- predicates so the local verdict surface
 -- ('JustCI.Verdict.verdictSummary'), which keeps 'SetupNode's in its
 -- dedicated @Setup@ section but wants the same aggregator drop as
 -- the GH surface, can seed its outcomes map by this predicate. The
 -- 'SetupNode' clause's 'True' is the right vacuous value because
--- callers that want to exclude setup nodes (i.e. 'isPostable')
+-- callers that want a setup-specific decision (e.g. 'isRequiredCheck')
 -- handle that case structurally before delegating here.
 --
--- Like 'isPostable', a missing 'RecipeName' is a runner-internal
--- contract violation, not a routine absent condition — every
--- 'RecipeNode' in the fanned graph originates from the recipe map
+-- A missing 'RecipeName' is a runner-internal contract violation,
+-- not a routine absent condition — every 'RecipeNode' in the
+-- fanned graph originates from the recipe map
 -- 'JustCI.Pipeline.buildNodeGraph' returned.
 isBodyBearing :: Map RecipeName Recipe -> NodeId -> Bool
 isBodyBearing _ (SetupNode _) = True
@@ -223,8 +229,7 @@ contextForNode = contextFrom . display
 -- the silent-drift risk of two parallel literal tables. The
 -- description half stays local because it's a presentation choice
 -- with no agreement obligation to the verdict side ('PsRunning' has
--- no terminal-status at all and 'PsSkipped'/'PsErrored' want
--- different wording even though they post different states).
+-- no terminal-status at all and 'PsErrored' wants its own wording).
 --
 -- The description's two shapes:
 --
@@ -234,42 +239,48 @@ contextForNode = contextFrom . display
 --     'PsRunning' transition fires at start so its elapsed would
 --     be zero (pointless to display); 'PsCompleted' carries the
 --     caller's measured elapsed in a @(\<elapsed\>)@ annotation.
+--     This is the first post for a node — there is no pre-run
+--     seed, so the @Pending@+@"Running"@ row appearing on the PR
+--     marks the moment the step actually starts executing.
 --
---   * /Did-not-run/ ('PsSkipped', 'PsErrored') — drops the log
---     path entirely (the file doesn't exist on disk; the cascade
---     left no output) and the elapsed (no meaningful runtime), in
---     favour of a short standalone label that names the case.
---     Prior to issue #26 these embedded the recipe's log path
---     unconditionally, so a failed setup turned every downstream
---     check into a broken pointer on the PR. The two split on state
---     and wording: 'PsSkipped' is the cascade (recipe didn't run
---     because an upstream failed; this recipe is probably fine) and
---     posts @Pending@+@"Skipped"@; 'PsErrored' is a real launch
---     failure (pc couldn't start the process) and posts
+--   * /Did-not-run/ ('PsErrored') — drops the log path entirely
+--     (the file doesn't exist on disk; the launch left no output)
+--     and the elapsed (no meaningful runtime), in favour of a
+--     short standalone label that names the case. Prior to issue
+--     \#26 this embedded the recipe's log path unconditionally, so
+--     a failed setup turned every downstream check into a broken
+--     pointer on the PR. 'PsErrored' is a real launch failure (pc
+--     couldn't start the process) and posts
 --     @Failure@+@"Errored (did not start)"@.
 --
--- Both shapes stay well under GitHub's 140-char description budget
--- at typical recipe-name lengths.
+-- 'PsSkipped' returns 'Nothing' — cascade-skipped recipes (an
+-- upstream dep failed and pc never started this one) do not post a
+-- justci status. The required-check row on the PR comes from
+-- GitHub's own "Expected — Waiting for status to be reported"
+-- placeholder, registered by 'JustCI.Pipeline.runProtect'. Posting a
+-- @Pending@+@"Skipped"@ row would duplicate that encapsulation and
+-- — worse — overwrite a prior @Success@ on a partial re-run, since
+-- process-compose re-emits 'PsSkipped' for downstreams of any
+-- re-running failed leaf. Clearing the gate requires re-running
+-- the failed root, not the cascaded recipe.
+--
+-- Both posted shapes stay well under GitHub's 140-char description
+-- budget at typical recipe-name lengths.
 describePost :: ProcessState -> Maybe NominalDiffTime -> FilePath -> Maybe (CommitStatus, Text)
 describePost ps mElapsed logPath = case ps.status of
   PsRunning -> Just (Pending, ranLabel "Running" Nothing)
   PsCompleted
     | ps.exit_code == 0 -> Just (terminalToCommitStatus TsSucceeded, ranLabel "Succeeded" mElapsed)
     | otherwise -> Just (terminalToCommitStatus TsFailed, ranLabel "Failed" mElapsed)
-  PsSkipped -> Just (terminalToCommitStatus TsSkipped, "Skipped")
+  -- Cascade-skipped: defer to branch-protection's "Expected — Waiting"
+  -- placeholder (see haddock above for the partial-re-run wedge case).
+  PsSkipped -> Nothing
   PsErrored -> Just (terminalToCommitStatus TsFailed, "Errored (did not start)")
   PsOther _ -> Nothing
   where
     ranLabel label elapsed = label <> elapsedSuffix elapsed <> ": " <> T.pack logPath
     elapsedSuffix Nothing = ""
     elapsedSuffix (Just dt) = " (" <> formatElapsed dt <> ")"
-
--- | Description for a 'seedPending' post: @"Queued: \<logPath\>"@.
--- The seed runs once per node at startup before any state event
--- arrives, so it has its own format — the per-event 'describePost'
--- doesn't see this lifecycle stage.
-seedDescription :: FilePath -> Text
-seedDescription logPath = "Queued: " <> T.pack logPath
 
 -- | Compact human-readable rendering of a 'NominalDiffTime': @\<n\>s@
 -- under a minute, @\<n\>m\<n\>s@ under an hour, @\<n\>h\<n\>m@ otherwise.
@@ -340,6 +351,16 @@ elapsedSince (Timings ref) node = do
 -- and exactly one 'JustCI.Verdict.RecipeOutcome' there, so adding a
 -- fourth wire-state constructor would surface as an exhaustiveness
 -- warning in both modules instead of a silent drift.
+--
+-- The 'TsSkipped' arm is no longer reached from the live posting
+-- path — 'describePost' short-circuits 'PsSkipped' to 'Nothing'
+-- before the projection is consulted — but the arm is kept so the
+-- function stays total against @TerminalStatus@'s
+-- @[minBound..maxBound]@ contract. Its value (@Pending@) records
+-- what GitHub would render if a cascade-skip ever did need a
+-- posted status; in current use, branch protection's
+-- "Expected — Waiting" placeholder supplies the same yellow-row
+-- semantics without justci having to post.
 terminalToCommitStatus :: TerminalStatus -> CommitStatus
 terminalToCommitStatus TsSucceeded = Success
 terminalToCommitStatus TsFailed = Failure

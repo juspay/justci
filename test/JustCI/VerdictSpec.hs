@@ -38,10 +38,11 @@ spec = do
         `shouldBe` ExitFailure 1
 
     it "is ExitFailure 1 when any node was skipped (upstream cascade)" $
-      -- Mirrors GitHub's required-check semantics: a Pending check
-      -- blocks merge, so the local exit code must agree and refuse
-      -- to call the run successful while a skipped recipe is on
-      -- the books.
+      -- Mirrors GitHub's required-check semantics: a required
+      -- check that never received a status sits at "Expected —
+      -- Waiting for status to be reported" and blocks merge, so
+      -- the local exit code must agree and refuse to call the run
+      -- successful while a skipped recipe is on the books.
       verdictCode (Map.fromList [(nodeLinux "a", Just Succeeded), (nodeLinux "b", Just Skipped)])
         `shouldBe` ExitFailure 1
 
@@ -151,10 +152,15 @@ spec = do
       terminalToCommitStatus TsFailed `shouldBe` Failure
 
     it "TsSkipped projects to Skipped / Pending" $ do
-      -- The cascade case: GH stays Pending (not Failure) so the
-      -- check is visibly "not yet met" rather than red; the CLI
-      -- summary calls it "skipped" so the two surfaces describe
-      -- the same wire-state with consistent vocabulary.
+      -- The cascade case. The Verdict side renders it as "skipped"
+      -- in the CLI summary. The CommitStatus side projects to
+      -- @Pending@ for cross-module agreement, but production
+      -- 'describePost' short-circuits 'PsSkipped' to 'Nothing'
+      -- before the projection is consulted — branch protection's
+      -- "Expected — Waiting for status to be reported" placeholder
+      -- supplies the yellow row instead. The projection lives on
+      -- so the @TerminalStatus@ → @CommitStatus@ function stays
+      -- total against @[minBound..maxBound]@.
       terminalToOutcome TsSkipped `shouldBe` Skipped
       terminalToCommitStatus TsSkipped `shouldBe` Pending
 
