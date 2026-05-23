@@ -39,8 +39,6 @@ module JustCI.Hosts
     -- * Loading + lookup
     resolveHosts,
     loadHostsFrom,
-    globalHostsPath,
-    repoHostsPath,
     lookupHost,
     hostsPlatforms,
     hostsToList,
