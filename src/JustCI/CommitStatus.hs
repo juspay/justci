@@ -10,7 +10,9 @@
 --     'seedPending' fans out @Pending@ posts at the top of a run so
 --     every expected check appears at once, and 'postStatusFor'
 --     translates each in-flight 'ProcessState' event into the
---     matching @Pending@ / @Success@ / @Failure@ update.
+--     matching @Pending@ / @Success@ / @Failure@ update. Cascade
+--     skips stay at @Pending@ but flip their description to
+--     @"Skipped"@.
 --   * The setup-node filter — internal plumbing nodes ('SetupNode')
 --     are excluded from both the seed and the per-event posts via a
 --     pattern match on 'NodeId', matching the same filter
@@ -19,11 +21,12 @@
 --   * The human-readable description per state (suffixed with the
 --     log path so the GitHub UI carries a navigable pointer).
 --   * 'terminalToCommitStatus' — the wire-side half of the
---     cross-module agreement with 'JustCI.Verdict.terminalToOutcome':
---     both consumers of 'TerminalStatus' derive from this one
---     mapping so the GH check page and the local exit code never
---     disagree about which terminal classification counts as
---     success.
+--     cross-module agreement with 'JustCI.Verdict.terminalToOutcome'.
+--     Both consumers of 'TerminalStatus' project from this one
+--     mapping, so every wire-classified terminal state has exactly
+--     one GH 'CommitStatus' and one local 'RecipeOutcome' — the GH
+--     check page and the local verdict summary cannot disagree on
+--     what counts as success, failure, or skipped.
 --
 -- The endpoint URL, the wire encoding of each state, and the
 -- form-field names are gh-API details owned by "JustCI.Gh".
@@ -91,7 +94,10 @@ import System.IO (hPutStrLn, stderr)
 -- status agree by construction. The two did-not-run terminal states
 -- ('PsSkipped', 'PsErrored') suppress the path — those nodes never
 -- wrote a log file, and a pointer to a missing file made every
--- cascaded check after a failed setup misleading (issue #26).
+-- cascaded check after a failed setup misleading (issue #26). The
+-- two also differ in state: 'PsSkipped' posts @Pending@+@"Skipped"@
+-- (cascade, not this recipe's fault); 'PsErrored' posts
+-- @Failure@+@"Errored (did not start)"@ (this recipe's launch broke).
 --
 -- Synchronous: each post blocks the subscription loop in
 -- 'JustCI.ProcessCompose.Events.subscribeStates' until @gh api@ returns. This
@@ -118,11 +124,12 @@ postStatusFor timings repo sha logDir recipes node ps
 -- one parallel @gh api@ POST per node, all joined before this returns.
 -- The PR's checks panel shows the full set of expected checks the moment
 -- the pipeline begins, instead of materializing them one at a time as
--- nodes start. Skipped nodes (whose upstream dep failed) get their
--- @pending@ overwritten by @failure@ when 'postStatusFor' fires; nodes
--- that never produce any event at all stay at @pending@, which
--- surfaces as a visible "why is this still pending?" signal rather
--- than silent absence.
+-- nodes start. Skipped nodes (whose upstream dep failed) keep their
+-- @pending@ — 'postStatusFor' overwrites only the description to
+-- @"Skipped"@ when the cascade fires. Nodes that never produce any
+-- event at all stay at @pending@+@"Queued: …"@, which surfaces as a
+-- visible "why is this still pending?" signal rather than silent
+-- absence.
 --
 -- GitHub has no batch endpoint for commit statuses
 -- (see <https://docs.github.com/en/rest/commits/statuses>), so this is
@@ -152,10 +159,12 @@ seedPending repo sha logDir recipes nodes =
 --     them is a denormalised duplicate that diverges from reality the
 --     moment a downstream leaf is retried individually. The retry
 --     overwrites the leaf's check to green but the aggregator's
---     'Skipped (upstream failed)' was never tied to a re-runnable
---     process, so it sticks at red and the PR can't merge. Removing
---     aggregators from the surface entirely means the required checks
---     are exactly the recipes that do real work.
+--     skipped post (now @Pending@+@"Skipped"@) was never tied to a
+--     re-runnable process, so it sticks at @pending@ and the PR
+--     still can't merge because a required @pending@ check is
+--     "not yet met". Removing aggregators from the surface entirely
+--     means the required checks are exactly the recipes that do
+--     real work.
 isPostable :: Map RecipeName Recipe -> NodeId -> Bool
 isPostable _ (SetupNode _) = False
 isPostable recipes n@(RecipeNode _ _) = isBodyBearing recipes n
@@ -219,10 +228,15 @@ contextForNode = contextFrom . display
 --   * /Did-not-run/ ('PsSkipped', 'PsErrored') — drops the log
 --     path entirely (the file doesn't exist on disk; the cascade
 --     left no output) and the elapsed (no meaningful runtime), in
---     favour of a short standalone label that names the failure
---     mode. Prior to issue #26 these embedded the recipe's log
---     path unconditionally, so a failed setup turned every
---     downstream check into a broken pointer on the PR.
+--     favour of a short standalone label that names the case.
+--     Prior to issue #26 these embedded the recipe's log path
+--     unconditionally, so a failed setup turned every downstream
+--     check into a broken pointer on the PR. The two split on state
+--     and wording: 'PsSkipped' is the cascade (recipe didn't run
+--     because an upstream failed; this recipe is probably fine) and
+--     posts @Pending@+@"Skipped"@; 'PsErrored' is a real launch
+--     failure (pc couldn't start the process) and posts
+--     @Failure@+@"Errored (did not start)"@.
 --
 -- Both shapes stay well under GitHub's 140-char description budget
 -- at typical recipe-name lengths.
@@ -232,7 +246,7 @@ describePost ps mElapsed logPath = case ps.status of
   PsCompleted
     | ps.exit_code == 0 -> Just (Success, ranLabel "Succeeded" mElapsed)
     | otherwise -> Just (Failure, ranLabel "Failed" mElapsed)
-  PsSkipped -> Just (Failure, "Skipped (upstream failed)")
+  PsSkipped -> Just (Pending, "Skipped")
   PsErrored -> Just (Failure, "Errored (did not start)")
   PsOther _ -> Nothing
   where
@@ -305,13 +319,18 @@ elapsedSince (Timings ref) node = do
       now <- getCurrentTime
       pure (Just (diffUTCTime now start))
 
--- | GitHub-side mapping for the two terminal classifications.
--- Production code now classifies each wire event through 'describePost'
--- (which distinguishes 'PsSkipped' \/ 'PsErrored' from 'PsCompleted'
--- exit-non-zero so it can drop the log path for nodes that never ran —
--- issue #26), but the binary "did it succeed?" projection still lives
--- here for "JustCI.Verdict.terminalToOutcome" to align against. The
--- cross-module agreement test in @VerdictSpec@ relies on this seam.
+-- | GitHub-side mapping for the three terminal classifications.
+-- Production code classifies each wire event through 'describePost'
+-- (which carries the description too — log path on ran nodes, short
+-- label on did-not-run nodes per issue #26), but the state-only
+-- projection lives here so "JustCI.Verdict.terminalToOutcome" has a
+-- single seam to align against. The cross-module agreement test in
+-- @VerdictSpec@ iterates @[minBound..maxBound]@ and checks that
+-- every 'TerminalStatus' projects to exactly one 'CommitStatus' here
+-- and exactly one 'JustCI.Verdict.RecipeOutcome' there, so adding a
+-- fourth wire-state constructor would surface as an exhaustiveness
+-- warning in both modules instead of a silent drift.
 terminalToCommitStatus :: TerminalStatus -> CommitStatus
 terminalToCommitStatus TsSucceeded = Success
 terminalToCommitStatus TsFailed = Failure
+terminalToCommitStatus TsSkipped = Pending

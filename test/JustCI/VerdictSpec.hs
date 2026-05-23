@@ -12,11 +12,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Text.Display (display)
 import JustCI.CommitStatus (terminalToCommitStatus)
-import JustCI.Gh (CommitStatus (Success))
+import JustCI.Gh (CommitStatus (Failure, Pending, Success))
 import JustCI.Justfile (RecipeName)
 import JustCI.Node (NodeId (..))
 import JustCI.Platform (Platform (..))
-import JustCI.ProcessCompose.Events (TerminalStatus)
+import JustCI.ProcessCompose.Events (TerminalStatus (..))
 import JustCI.Verdict (RecipeOutcome (..), terminalToOutcome, verdictCode, verdictSummary)
 import System.Exit (ExitCode (..))
 import Test.Hspec
@@ -35,6 +35,14 @@ spec = do
 
     it "is ExitFailure 1 when any node failed" $
       verdictCode (Map.fromList [(nodeLinux "a", Just Succeeded), (nodeLinux "b", Just Failed)])
+        `shouldBe` ExitFailure 1
+
+    it "is ExitFailure 1 when any node was skipped (upstream cascade)" $
+      -- Mirrors GitHub's required-check semantics: a Pending check
+      -- blocks merge, so the local exit code must agree and refuse
+      -- to call the run successful while a skipped recipe is on
+      -- the books.
+      verdictCode (Map.fromList [(nodeLinux "a", Just Succeeded), (nodeLinux "b", Just Skipped)])
         `shouldBe` ExitFailure 1
 
     it "is ExitFailure 1 when any node never reached terminal (Nothing)" $
@@ -56,6 +64,13 @@ spec = do
     it "renders Nothing as 'did not run' when the lane's setup is fine" $ do
       let joined = summary [(nodeLinux "alpha", Nothing)]
       ("did not run" `T.isInfixOf` joined) `shouldBe` True
+
+    it "renders Just Skipped as 'skipped' (cascade — distinct from 'failed')" $ do
+      -- Same vocabulary the GH commit status uses for the cascade
+      -- case. Failed recipes still render as "failed".
+      let joined = summary [(nodeLinux "alpha", Just Skipped), (nodeLinux "beta", Just Failed)]
+      ("alpha" `T.isInfixOf` joined && "skipped" `T.isInfixOf` joined) `shouldBe` True
+      ("beta" `T.isInfixOf` joined && "failed" `T.isInfixOf` joined) `shouldBe` True
 
     it "groups recipes by platform lane" $ do
       let nodes = [(RecipeNode "alpha" X86_64Linux, Just Succeeded), (RecipeNode "alpha" Aarch64Darwin, Just Failed)]
@@ -109,11 +124,35 @@ spec = do
       ("all 3 nodes succeeded" `T.isInfixOf` joined) `shouldBe` True
 
   -- Cross-module invariant: the two consumers of 'TerminalStatus'
-  -- ('terminalToOutcome' in JustCI.Verdict, 'terminalToCommitStatus' in
-  -- JustCI.CommitStatus) must agree on which terminal classification
-  -- counts as "success".
-  describe "TerminalStatus" $
-    it "terminalToOutcome and terminalToCommitStatus agree on the success case" $
-      for_ [minBound .. maxBound :: TerminalStatus] $ \ts ->
-        (terminalToOutcome ts == Succeeded)
-          `shouldBe` (terminalToCommitStatus ts == Success)
+  -- ('terminalToOutcome' in JustCI.Verdict, 'terminalToCommitStatus'
+  -- in JustCI.CommitStatus) must agree on the per-constructor
+  -- projection — every 'TerminalStatus' value maps to exactly one
+  -- 'CommitStatus' and one 'RecipeOutcome', and the two consumers'
+  -- semantics line up. Iterating @[minBound..maxBound]@ traps any
+  -- future drift: adding a fourth 'TerminalStatus' constructor would
+  -- force an update on this table or surface as a non-exhaustive
+  -- pattern in one of the projection functions.
+  describe "TerminalStatus" $ do
+    it "TsSucceeded projects to Succeeded / Success" $ do
+      terminalToOutcome TsSucceeded `shouldBe` Succeeded
+      terminalToCommitStatus TsSucceeded `shouldBe` Success
+
+    it "TsFailed projects to Failed / Failure" $ do
+      terminalToOutcome TsFailed `shouldBe` Failed
+      terminalToCommitStatus TsFailed `shouldBe` Failure
+
+    it "TsSkipped projects to Skipped / Pending" $ do
+      -- The cascade case: GH stays Pending (not Failure) so the
+      -- check is visibly "not yet met" rather than red; the CLI
+      -- summary calls it "skipped" so the two surfaces describe
+      -- the same wire-state with consistent vocabulary.
+      terminalToOutcome TsSkipped `shouldBe` Skipped
+      terminalToCommitStatus TsSkipped `shouldBe` Pending
+
+    it "every TerminalStatus value has a defined projection on both sides" $
+      -- Catches the "added a constructor, forgot one side" mistake.
+      -- The bodies trigger pattern-match exhaustiveness; the
+      -- iteration confirms both functions are total.
+      for_ [minBound .. maxBound :: TerminalStatus] $ \ts -> do
+        terminalToOutcome ts `shouldSatisfy` (`elem` [Succeeded, Failed, Skipped])
+        terminalToCommitStatus ts `shouldSatisfy` (`elem` [Success, Failure, Pending])
