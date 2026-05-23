@@ -47,7 +47,7 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
-import JustCI.CommitStatus (clearStaleStatuses, contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
+import JustCI.CommitStatus (contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
@@ -215,16 +215,6 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
     (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
-    -- Heal the per-SHA commit-status feed before the observer comes up:
-    -- if a prior run on this SHA posted (and then failed) for a
-    -- context whose backing node is no longer in the canonical DAG —
-    -- e.g. a platform that's been unconfigured from hosts.json
-    -- between runs — overwrite the stale post with Success+reset.
-    -- Canonical is the full fanout from the `[metadata("ci")]` root
-    -- with no user selectors (the same shape `runProtect` uses), so
-    -- partial re-runs leave their siblings alone.
-    (canonicalGraph, _, _) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
-    clearStaleStatuses repo sha recipes (G.vertexList canonicalGraph)
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)

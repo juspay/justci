@@ -42,7 +42,6 @@
 module JustCI.CommitStatus
   ( -- * Posting
     postStatusFor,
-    clearStaleStatuses,
 
     -- * Per-node timing
     Timings,
@@ -67,34 +66,26 @@ module JustCI.CommitStatus
     -- posting-policy predicate's branches stay locked. Production
     -- code consults this via 'postStatusFor''s internal guard;
     -- no external module imports it directly.
-    staleContexts,
-    -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the
-    -- stale-clear selection logic ('clearStaleStatuses''s pure
-    -- core) is locked down without spinning up the @gh@ subprocess.
     formatElapsed,
     -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the human-readable
     -- duration formatter's branches stay locked.
   )
 where
 
-import Control.Concurrent.Async (forConcurrently_)
 import Control.Monad (when)
 import Data.Foldable (for_)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
-import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Display (display)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
-import JustCI.Gh (CommitStatus (..), CommitStatusPost (..), Context, Repo, combinedStatus, contextFrom, postCommitStatus)
+import JustCI.Gh (CommitStatus (..), CommitStatusPost (..), Context, Repo, contextFrom, postCommitStatus)
 import JustCI.Git (Sha)
 import JustCI.Justfile (Recipe, RecipeName, hasBody)
 import JustCI.LogPath (logPathFor)
-import JustCI.Node (NodeId (..), parseNodeId)
+import JustCI.Node (NodeId (..))
 import JustCI.ProcessCompose.Events (ProcessState (..), ProcessStatus (..), TerminalStatus (..))
 import System.IO (hPutStrLn, stderr)
 
@@ -210,88 +201,17 @@ isBodyBearing recipes (RecipeNode r _) = case Map.lookup r recipes of
   Just recipe -> hasBody recipe
   Nothing -> error $ "internal error: RecipeNode " <> T.unpack (display r) <> " missing from recipe map (buildNodeGraph contract violated)"
 
--- | Issue one commit-status POST for a 'NodeId' — delegates to
--- 'postOneContext' after rendering the node to its 'Context'.
+-- | Issue one commit-status POST with a caller-supplied description and
+-- log the outcome.
 postOne :: Repo -> Sha -> NodeId -> CommitStatus -> Text -> IO ()
-postOne repo sha node cs = postOneContext repo sha (contextForNode node) cs
-
--- | Issue one commit-status POST for a bare 'Context' (used by the
--- stale-clear path, which works from prior-run contexts that may no
--- longer have a backing 'NodeId' in the current run's graph).
-postOneContext :: Repo -> Sha -> Context -> CommitStatus -> Text -> IO ()
-postOneContext repo sha ctx cs desc = do
-  let post = CommitStatusPost {state = cs, context = ctx, description = desc}
+postOne repo sha node cs desc = do
+  let ctx = contextForNode node
+      post = CommitStatusPost {state = cs, context = ctx, description = desc}
   result <- postCommitStatus repo sha post
   let line = "gh: " <> T.unpack (display ctx) <> " " <> T.unpack (display cs)
   case result of
     Right () -> hPutStrLn stderr line
     Left e -> hPutStrLn stderr $ line <> " FAILED: " <> T.unpack (display e)
-
--- | Heal the per-SHA commit-status feed at the top of a strict run:
--- find any justci-owned context with a non-@Success@ status on @sha@
--- whose backing node isn't in this run's canonical post set, and
--- overwrite it with @Success@+@"Reset: not scheduled in current run"@.
---
--- Why it's necessary: GitHub stacks commit-status posts indefinitely
--- and renders the latest per context. A context whose node has
--- fallen out of the canonical DAG between runs (the wedge: a
--- platform whose @hosts.json@ entry was removed, a recipe that was
--- deleted, a setup node whose remote was decommissioned) keeps its
--- prior terminal state forever because no current run posts a
--- replacement. Without this pass, a one-off bad SSH setup poisons
--- the PR until someone manually @gh api@'s a clearing post.
---
--- "Canonical" here is the full fanout from the @[metadata("ci")]@
--- root with no user selectors applied — the same definition
--- 'JustCI.Pipeline.runProtect' uses for its required-checks list.
--- This matters for partial re-runs (@--no-deps@, @--root@): the
--- canonical set still contains the un-selected siblings, so their
--- prior posts are left alone. Only contexts that no canonical run
--- could ever re-post (given the current @hosts.json@ + @--host@
--- overrides) qualify as stale.
---
--- 'Success' is the correct reset state under the four-state
--- commit-status API: @Pending@ would re-block merge, @Failure@
--- would lie about a recipe that did not run, @Error@ overloads
--- system-error semantics. @Success@+description-as-receipt is the
--- least-bad fit; the description preserves traceability.
---
--- Failures fetching the prior statuses (network blip, gh-auth
--- problem) are logged to stderr and swallowed — a missed
--- stale-clear is a lesser harm than refusing to run.
-clearStaleStatuses :: Repo -> Sha -> Map RecipeName Recipe -> [NodeId] -> IO ()
-clearStaleStatuses repo sha recipes canonicalNodes = do
-  result <- combinedStatus repo sha
-  case result of
-    Left err ->
-      hPutStrLn stderr $ "gh: combined-status failed: " <> show err <> " (stale-clear skipped)"
-    Right rows ->
-      let expected = Set.fromList [contextForNode n | n <- canonicalNodes, shouldPostStatus recipes n]
-          stale = staleContexts expected rows
-       in forConcurrently_ stale $ \ctx ->
-            postOneContext repo sha ctx Success "Reset: not scheduled in current run"
-
--- | Pure core of 'clearStaleStatuses': given the canonical post-set
--- of 'Context's and a list of @(context, state)@ rows fetched from
--- the combined-status endpoint, return the subset that needs a
--- reset post — justci-owned contexts ('isJustciContext') not in
--- @expected@ whose current state isn't already 'Success'. Factored
--- out so the policy is testable without mocking @gh@.
-staleContexts :: Set Context -> [(Context, CommitStatus)] -> [Context]
-staleContexts expected =
-  fmap fst
-    . filter (\(ctx, state) -> isJustciContext ctx && not (ctx `Set.member` expected) && state /= Success)
-
--- | Is @ctx@ justci-owned? True iff it parses as a 'NodeId' via the
--- canonical wire form @\<name\>\@\<platform\>@. The 'parseNodeId'
--- success is the single source of truth for ownership — every
--- context justci posts is minted via 'contextForNode', and every
--- 'contextForNode' output round-trips through 'parseNodeId'. A
--- third-party check (SentinelOne, GH Actions, etc.) won't parse as
--- a 'NodeId', so the stale-clear never resets a status it didn't
--- write.
-isJustciContext :: Context -> Bool
-isJustciContext ctx = isJust (parseNodeId (display ctx))
 
 -- | The single source of truth for status-check context names: a
 -- 'NodeId' rendered as @\<recipe\>\@\<platform\>@. Named (rather
