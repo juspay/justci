@@ -216,6 +216,16 @@ contextForNode = contextFrom . display
 -- description)@ pair the per-event poster sends to GitHub. 'Nothing'
 -- for events the poster drops on the floor (non-terminal 'PsOther').
 --
+-- The @CommitStatus@ half of every terminal arm is derived from
+-- 'terminalToCommitStatus' rather than inlined, so the wire→GH-state
+-- mapping has one definition site: a future change to (say)
+-- @terminalToCommitStatus TsSkipped@ propagates to every arm without
+-- the silent-drift risk of two parallel literal tables. The
+-- description half stays local because it's a presentation choice
+-- with no agreement obligation to the verdict side ('PsRunning' has
+-- no terminal-status at all and 'PsSkipped'/'PsErrored' want
+-- different wording even though they post different states).
+--
 -- The description's two shapes:
 --
 --   * /Ran-or-running/ ('PsRunning', 'PsCompleted') — embeds the
@@ -244,10 +254,10 @@ describePost :: ProcessState -> Maybe NominalDiffTime -> FilePath -> Maybe (Comm
 describePost ps mElapsed logPath = case ps.status of
   PsRunning -> Just (Pending, ranLabel "Running" Nothing)
   PsCompleted
-    | ps.exit_code == 0 -> Just (Success, ranLabel "Succeeded" mElapsed)
-    | otherwise -> Just (Failure, ranLabel "Failed" mElapsed)
-  PsSkipped -> Just (Pending, "Skipped")
-  PsErrored -> Just (Failure, "Errored (did not start)")
+    | ps.exit_code == 0 -> Just (terminalToCommitStatus TsSucceeded, ranLabel "Succeeded" mElapsed)
+    | otherwise -> Just (terminalToCommitStatus TsFailed, ranLabel "Failed" mElapsed)
+  PsSkipped -> Just (terminalToCommitStatus TsSkipped, "Skipped")
+  PsErrored -> Just (terminalToCommitStatus TsFailed, "Errored (did not start)")
   PsOther _ -> Nothing
   where
     ranLabel label elapsed = label <> elapsedSuffix elapsed <> ": " <> T.pack logPath
