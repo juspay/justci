@@ -14,7 +14,8 @@ import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
 import Data.Text.Display (display)
 import JustCI.Hosts
-  ( hostFromText,
+  ( HostsLoadError,
+    hostFromText,
     hostsPlatforms,
     hostsToList,
     loadHostsFrom,
@@ -30,25 +31,18 @@ spec :: Spec
 spec = do
   describe "loadHostsFrom" $ do
     it "treats a missing file as empty (no error)" $ do
-      result <- loadHostsFrom "/this/path/does/not/exist/hosts.json"
-      case result of
-        Right hs -> hostsPlatforms hs `shouldBe` []
-        Left e -> expectationFailure $ "expected Right, got Left: " <> show e
+      hs <- assertRight =<< loadHostsFrom "/this/path/does/not/exist/hosts.json"
+      hostsPlatforms hs `shouldBe` []
 
     it "decodes a well-formed file" $ withTempHosts wellFormedJson $ \path -> do
-      result <- loadHostsFrom path
-      case result of
-        Right hs -> do
-          lookupHost X86_64Linux hs `shouldBe` Just (hostFromText "builder.example.com")
-          lookupHost Aarch64Darwin hs `shouldBe` Just (hostFromText "mac-runner.example.com")
-          lookupHost Aarch64Linux hs `shouldBe` Nothing
-        Left e -> expectationFailure $ "expected Right, got Left: " <> show e
+      hs <- assertRight =<< loadHostsFrom path
+      lookupHost X86_64Linux hs `shouldBe` Just (hostFromText "builder.example.com")
+      lookupHost Aarch64Darwin hs `shouldBe` Just (hostFromText "mac-runner.example.com")
+      lookupHost Aarch64Linux hs `shouldBe` Nothing
 
     it "drops unknown platform keys silently" $ withTempHosts withUnknownKeyJson $ \path -> do
-      result <- loadHostsFrom path
-      case result of
-        Right hs -> hostsPlatforms hs `shouldBe` [X86_64Linux]
-        Left e -> expectationFailure $ "expected Right, got Left: " <> show e
+      hs <- assertRight =<< loadHostsFrom path
+      hostsPlatforms hs `shouldBe` [X86_64Linux]
 
     it "surfaces a decode error naming the file" $ withTempHosts "{not json" $ \path -> do
       result <- loadHostsFrom path
@@ -64,8 +58,8 @@ spec = do
     it "repo file overrides the global file" $
       withTempHosts globalJson $ \globalPath ->
         withTempHosts repoJson $ \repoPath -> do
-          Right global <- loadHostsFrom globalPath
-          Right repo <- loadHostsFrom repoPath
+          global <- assertRight =<< loadHostsFrom globalPath
+          repo <- assertRight =<< loadHostsFrom repoPath
           let merged = mergeHostOverrides (hostsToList repo) global
           display <$> lookupHost X86_64Linux merged `shouldBe` Just "repo-linux"
           display <$> lookupHost Aarch64Darwin merged `shouldBe` Just "global-mac"
@@ -73,8 +67,8 @@ spec = do
     it "CLI overrides win over both file layers" $
       withTempHosts globalJson $ \globalPath ->
         withTempHosts repoJson $ \repoPath -> do
-          Right global <- loadHostsFrom globalPath
-          Right repo <- loadHostsFrom repoPath
+          global <- assertRight =<< loadHostsFrom globalPath
+          repo <- assertRight =<< loadHostsFrom repoPath
           let cli = [(X86_64Linux, hostFromText "cli-linux")]
           let merged = mergeHostOverrides cli . mergeHostOverrides (hostsToList repo) $ global
           display <$> lookupHost X86_64Linux merged `shouldBe` Just "cli-linux"
@@ -83,8 +77,8 @@ spec = do
     it "platforms only in the repo file appear in the merged result" $
       withTempHosts globalOnlyLinuxJson $ \globalPath ->
         withTempHosts repoOnlyDarwinJson $ \repoPath -> do
-          Right global <- loadHostsFrom globalPath
-          Right repo <- loadHostsFrom repoPath
+          global <- assertRight =<< loadHostsFrom globalPath
+          repo <- assertRight =<< loadHostsFrom repoPath
           let merged = mergeHostOverrides (hostsToList repo) global
           display <$> lookupHost X86_64Linux merged `shouldBe` Just "global-linux"
           display <$> lookupHost Aarch64Darwin merged `shouldBe` Just "repo-mac"
@@ -92,12 +86,18 @@ spec = do
   describe "hostsToList" $
     it "round-trips through loadHostsFrom + mergeHostOverrides" $
       withTempHosts wellFormedJson $ \path -> do
-        Right hs <- loadHostsFrom path
+        hs <- assertRight =<< loadHostsFrom path
         -- Re-overlaying a Hosts on top of itself is a no-op (left-biased
         -- union of identical keys), so the resulting hostsPlatforms set
         -- is unchanged.
         let reflowed = mergeHostOverrides (hostsToList hs) hs
         hostsPlatforms reflowed `shouldMatchList` hostsPlatforms hs
+
+-- | Assert that an @Either HostsLoadError@ result is @Right@, returning
+-- the value or failing the test with the rendered error.
+assertRight :: Either HostsLoadError a -> IO a
+assertRight (Right a) = pure a
+assertRight (Left e) = expectationFailure (show e) >> fail "unreachable"
 
 -- | Write @bs@ to a fresh file in the system tempdir, run @k@ with the
 -- path, then remove the file. Used to feed 'loadHostsFrom' fixture
