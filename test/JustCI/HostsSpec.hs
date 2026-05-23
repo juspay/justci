@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Tests for "JustCI.Hosts"'s file-load surface and the layered
--- composition that 'JustCI.Pipeline.resolveHosts' uses. The IO half
+-- composition that 'JustCI.Hosts.resolveHosts' uses. The IO half
 -- ('loadHostsFrom') exercises the JSON-decode path against fixture
 -- files written to a tempdir; the pure half ('mergeHostOverrides'
 -- composed with 'hostsToList') exercises the layering precedence
