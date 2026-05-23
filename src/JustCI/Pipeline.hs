@@ -52,7 +52,7 @@ import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, ro
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
-import JustCI.Hosts (Host, Hosts, HostsLoadError, hostsToList, loadGlobalHosts, loadRepoHosts, lookupHost, mergeHostOverrides)
+import JustCI.Hosts (Hosts, lookupHost, resolveHosts)
 import JustCI.Justfile (Recipe, RecipeName, fetchDump, recipeCommand)
 import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
@@ -152,33 +152,6 @@ withCiLock lockPath sockFile action =
           unless (isDoesNotExistError e) (throwIO e)
         action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
-
--- | Resolve the layered host config used by every entry point:
--- global @~\/.config\/justci\/hosts.json@ ◁ per-repo
--- @\$PWD\/.justci\/hosts.json@ ◁ CLI @--host@ overrides. Rightmost
--- wins. The two file layers each surface their own
--- 'JustCI.Hosts.HostsLoadError' (carrying the offending path) so a
--- malformed repo file points at the repo file in the error.
---
--- Every entry point routes through this — including 'runGraph',
--- 'runDumpYaml', and 'runProtect' — so the documented invariant
--- "dump-yaml shows what run does" holds when a repo file is
--- committed. The non-run entries pass @[]@ for the CLI layer;
--- @--host@ is intentionally ephemeral and shouldn't affect
--- @justci protect@'s required-checks list.
-resolveHosts :: [(Platform, Host)] -> IO (Either HostsLoadError Hosts)
-resolveHosts cliOverrides =
-  loadGlobalHosts >>= \case
-    Left err -> pure (Left err)
-    Right global ->
-      loadRepoHosts >>= \case
-        Left err -> pure (Left err)
-        Right repo ->
-          pure
-            . Right
-            . mergeHostOverrides cliOverrides
-            . mergeHostOverrides (hostsToList repo)
-            $ global
 
 -- | Local mode: live working tree, no GitHub status posts, no per-recipe
 -- log routing. The observer still runs — its only consumer is the

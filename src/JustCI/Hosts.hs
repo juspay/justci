@@ -1,5 +1,6 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -36,9 +37,8 @@ module JustCI.Hosts
     mergeHostOverrides,
 
     -- * Loading + lookup
+    resolveHosts,
     loadHostsFrom,
-    loadGlobalHosts,
-    loadRepoHosts,
     globalHostsPath,
     repoHostsPath,
     lookupHost,
@@ -76,13 +76,12 @@ hostFromText :: Text -> Host
 hostFromText = Host
 
 -- | Overlay an association-list layer onto a 'Hosts' map; the overlay
--- wins on collision. The single layer-merge receptacle:
--- 'JustCI.Pipeline.resolveHosts' uses it twice — once with the
--- per-repo layer (flattened via 'hostsToList') on top of the global
--- layer, then with the CLI @--host@ list on top of that — so the
--- three-source precedence (global ◁ repo ◁ CLI) collapses to two
--- folds of the same function, no parallel @Hosts -> Hosts -> Hosts@
--- needed.
+-- wins on collision. The single layer-merge receptacle: 'resolveHosts'
+-- uses it twice — once with the per-repo layer (flattened via
+-- 'hostsToList') on top of the global layer, then with the CLI
+-- @--host@ list on top of that — so the three-source precedence
+-- (global ◁ repo ◁ CLI) collapses to two folds of the same
+-- function, no parallel @Hosts -> Hosts -> Hosts@ needed.
 --
 -- The CLI use case is a one-shot redirect to a throwaway target
 -- (e.g. an LXC container) without editing any on-disk config; the
@@ -192,9 +191,36 @@ hostsPlatforms (Hosts m) = Map.keys m
 
 -- | Flatten a 'Hosts' value to an association list. Inverse of the
 -- 'Map.fromList' inside 'loadHostsFrom'. The only production caller
--- is 'JustCI.Pipeline.resolveHosts', which uses it to feed a loaded
--- per-repo layer through 'mergeHostOverrides' on top of the global
--- layer — reusing the existing left-biased merge instead of
--- introducing a parallel @Hosts -> Hosts -> Hosts@ function.
+-- is 'resolveHosts', which uses it to feed a loaded per-repo layer
+-- through 'mergeHostOverrides' on top of the global layer — reusing
+-- the existing left-biased merge instead of introducing a parallel
+-- @Hosts -> Hosts -> Hosts@ function.
 hostsToList :: Hosts -> [(Platform, Host)]
 hostsToList (Hosts m) = Map.toList m
+
+-- | Resolve the layered host config used by every pipeline entry
+-- point: global @~\/.config\/justci\/hosts.json@ ◁ per-repo
+-- @\$PWD\/.justci\/hosts.json@ ◁ CLI @--host@ overrides. Rightmost
+-- wins. Each file layer surfaces its own 'HostsLoadError' (carrying
+-- the offending path) so a malformed repo file points at the repo
+-- file in the error.
+--
+-- Every "JustCI.Pipeline" entry point routes through this — including
+-- @runGraph@, @runDumpYaml@, and @runProtect@ — so the documented
+-- invariant "dump-yaml shows what run does" holds when a repo file
+-- is committed. The non-run entries pass @[]@ for the CLI layer;
+-- @--host@ is intentionally ephemeral and shouldn't affect
+-- @justci protect@'s required-checks list.
+resolveHosts :: [(Platform, Host)] -> IO (Either HostsLoadError Hosts)
+resolveHosts cliOverrides =
+  loadGlobalHosts >>= \case
+    Left err -> pure (Left err)
+    Right global ->
+      loadRepoHosts >>= \case
+        Left err -> pure (Left err)
+        Right repo ->
+          pure
+            . Right
+            . mergeHostOverrides cliOverrides
+            . mergeHostOverrides (hostsToList repo)
+            $ global
