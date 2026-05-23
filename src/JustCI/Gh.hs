@@ -1,5 +1,6 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -27,12 +28,14 @@ module JustCI.Gh
     viewDefaultBranch,
     contextFrom,
     postCommitStatus,
+    combinedStatus,
     setRequiredChecks,
   )
 where
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy.Char8 as BL
+import Data.Maybe (mapMaybe)
 import Data.String (IsString)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -140,7 +143,7 @@ instance Display CommitStatus where
 -- value itself as free-form text — the @ci/\<recipe\>@ naming convention
 -- is CI policy, owned by "JustCI.CommitStatus".
 newtype Context = Context Text
-  deriving stock (Show)
+  deriving stock (Show, Eq, Ord)
   deriving newtype (Display)
 
 -- | The smart constructor for 'Context'. The value is opaque to GitHub, so
@@ -183,6 +186,48 @@ apiPost endpoint fields = do
   where
     args = ["api", "-X", "POST", T.unpack endpoint] ++ concatMap formArg fields
     formArg (k, v) = ["-f", T.unpack k <> "=" <> T.unpack v]
+
+-- | GET the deduplicated commit-status state per context for @sha@ —
+-- one row per 'Context', collapsing GitHub's stacked event log to its
+-- latest state. Used by "JustCI.CommitStatus.clearStaleStatuses" to
+-- locate justci-owned contexts whose backing node has fallen out of
+-- the canonical DAG between runs (e.g. an SSH platform that was
+-- unconfigured) and reset them.
+--
+-- Uses the @\/commits\/{sha}\/status@ "Combined Status" endpoint
+-- (rather than @\/statuses\/{sha}@) precisely because it returns one
+-- row per context. Rows whose state isn't one of the four
+-- 'CommitStatus' wire forms are silently dropped — third-party
+-- services occasionally post nonstandard values, but those aren't
+-- justci-owned and the consumer filters by context anyway.
+combinedStatus :: Repo -> Sha -> IO (Either GhError [(Context, CommitStatus)])
+combinedStatus repo sha = do
+  result <-
+    runSubprocess
+      "gh api combined-status"
+      ghBin
+      ["api", "-X", "GET", T.unpack endpoint, "-q", ".statuses[] | [.context, .state] | @tsv"]
+      ""
+  pure $ case result of
+    Left e -> Left (GhSubprocess e)
+    Right out -> Right (mapMaybe parseRow (T.lines (T.pack out)))
+  where
+    endpoint = "/repos/" <> display repo.owner <> "/" <> display repo.name <> "/commits/" <> display sha <> "/status"
+    parseRow line = case T.splitOn "\t" line of
+      [ctxText, stateText] -> (\cs -> (contextFrom ctxText, cs)) <$> parseCommitStatus stateText
+      _ -> Nothing
+
+-- | Inverse of @display :: CommitStatus -> Text@. 'Nothing' on any
+-- value GitHub didn't write — keeps the wire-format mismatch surface
+-- (combined-status JSON → typed enum) explicit instead of
+-- defaulting silently.
+parseCommitStatus :: Text -> Maybe CommitStatus
+parseCommitStatus = \case
+  "pending" -> Just Pending
+  "success" -> Just Success
+  "failure" -> Just Failure
+  "error" -> Just Error
+  _ -> Nothing
 
 -- | Replace the required status checks on a branch's protection ruleset.
 -- PATCHes

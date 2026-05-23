@@ -11,9 +11,10 @@
 module JustCI.CommitStatusSpec (spec) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as T
-import JustCI.CommitStatus (describePost, formatElapsed, isBodyBearing, isRequiredCheck, shouldPostStatus)
-import JustCI.Gh (CommitStatus (..))
+import JustCI.CommitStatus (describePost, formatElapsed, isBodyBearing, isRequiredCheck, shouldPostStatus, staleContexts)
+import JustCI.Gh (CommitStatus (..), contextFrom)
 import JustCI.Justfile (Recipe (..))
 import JustCI.Node (NodeId (..))
 import JustCI.Platform (Platform (..))
@@ -142,3 +143,48 @@ spec = do
       -- own Setup section); isBodyBearing's vacuous True for them is
       -- what lets the same predicate seed the verdict outcomes map.
       isBodyBearing recipes setupNode `shouldBe` True
+
+  -- Pure core of clearStaleStatuses — selects which prior-run posts
+  -- need a reset, given the canonical expected set and the rows
+  -- fetched from gh's combined-status endpoint.
+  describe "staleContexts" $ do
+    let workLinux = contextFrom "ci::work@x86_64-linux"
+        workDarwin = contextFrom "ci::work@aarch64-darwin"
+        setupLinux = contextFrom "_ci-setup@x86_64-linux"
+        sentinel = contextFrom "SentinelOne CNS Hardcoded Secret Detection Check"
+        bogus = contextFrom "not-parseable-as-NodeId"
+
+    it "resets a justci context whose backing node is no longer canonical" $
+      -- The wedge case: a prior run posted Failure for a node that
+      -- this run's canonical DAG no longer fans out to (e.g. linux
+      -- removed from hosts.json). Without a reset, the failing post
+      -- sticks at the latest state on the SHA forever.
+      staleContexts (Set.fromList [workDarwin]) [(setupLinux, Failure), (workDarwin, Success)]
+        `shouldBe` [setupLinux]
+
+    it "leaves canonical contexts alone even when they're failing" $
+      -- A canonical-and-failing context is the normal failed-run
+      -- case; the next run's per-event poster will overwrite it.
+      -- staleContexts must not touch it.
+      staleContexts (Set.fromList [workLinux, workDarwin]) [(workLinux, Failure), (workDarwin, Success)]
+        `shouldBe` []
+
+    it "leaves third-party contexts alone (only justci-owned contexts reset)" $
+      -- SentinelOne / GH Actions / other-tooling contexts don't
+      -- parse as a NodeId, so they're not justci-owned and never
+      -- get a reset post. (Posting Success for them would silently
+      -- overwrite their real state.)
+      staleContexts Set.empty [(sentinel, Failure), (bogus, Failure)]
+        `shouldBe` []
+
+    it "skips contexts whose latest state is already Success" $
+      -- A stale-but-green context doesn't need a reset — the latest
+      -- state already matches what we'd post. No post = less log
+      -- noise and no extra @gh api@ call.
+      staleContexts Set.empty [(setupLinux, Success)]
+        `shouldBe` []
+
+    it "resets stale Pending and Error contexts too (not just Failure)" $
+      -- Any non-Success terminal counts as a stale block.
+      staleContexts Set.empty [(setupLinux, Pending), (workLinux, Error)]
+        `shouldBe` [setupLinux, workLinux]
