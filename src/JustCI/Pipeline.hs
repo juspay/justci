@@ -47,7 +47,7 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
-import JustCI.CommitStatus (contextForNode, isBodyBearing, isPostable, newTimings, postStatusFor, seedPending)
+import JustCI.CommitStatus (contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
 import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
@@ -217,7 +217,6 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
     (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
     let nodes = processNames pc
     createPlatformDirs logDir nodes
-    seedPending repo sha logDir recipes nodes
     outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
     timings <- newTimings
     let onState ps = withParsedNode ps $ \node ->
@@ -262,9 +261,20 @@ runDumpYaml = do
 -- | Branch-protection helper: read the canonical DAG, extract the
 -- @(recipe, platform)@ context for every user-facing node, and PATCH
 -- the GitHub branch protection's required-status-checks list to
--- exactly that set. The user-facing filter is the same one
--- 'JustCI.CommitStatus.postStatusFor' applies — setup nodes never post
--- statuses, so they never show up as required checks either.
+-- exactly that set. The filter is 'isRequiredCheck' — body-bearing
+-- recipes only. Setup nodes are excluded for liveness (local-only
+-- runs never schedule them), and pure-aggregator recipes are
+-- excluded because their state is fully derivative of their
+-- leaves. Note this is /narrower/ than 'shouldPostStatus', which
+-- includes setup nodes so setup failures surface on the PR — only
+-- some posted statuses are merge-blocking.
+--
+-- For cascade-skipped recipes (whose required-check row is supplied
+-- by GitHub's "Expected — Waiting for status to be reported"
+-- placeholder once branch protection is configured), this list is
+-- the only thing keeping the PR un-mergeable: 'postStatusFor' no
+-- longer posts a parallel @Pending@+@"Skipped"@ row. The placeholder
+-- is the canonical encapsulation of "required but unreported."
 --
 -- The DAG comes from the canonical @[metadata("ci")]@ root: there's
 -- no @--root@ on @protect@ because the required-check list is the
@@ -283,7 +293,7 @@ runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
   (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
-  let contexts = contextForNode <$> filter (isPostable recipes) (G.vertexList nodeGraph)
+  let contexts = contextForNode <$> filter (isRequiredCheck recipes) (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
     _ -> pure ()
@@ -470,8 +480,9 @@ instance Display BuildGraphError where
 -- Returns the filtered fanned-out graph, the local platform, and the
 -- full justfile recipe map (keyed by 'RecipeName'). The platform is
 -- needed downstream for transport selection ('commandForNode'); the
--- recipe map is needed by 'JustCI.CommitStatus.isPostable' so the
--- GH-status and branch-protection filters can drop pure aggregators.
+-- recipe map is needed by 'JustCI.CommitStatus.shouldPostStatus' and
+-- 'JustCI.CommitStatus.isRequiredCheck' so the GH-status and
+-- branch-protection filters can drop pure aggregators.
 -- Both are computed here anyway as part of fanout — exposing them
 -- avoids shelling out to @just --dump@ a second time and avoids the
 -- dormant divergence risk of two parses going out of sync mid-run.
