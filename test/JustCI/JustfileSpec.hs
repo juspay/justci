@@ -64,6 +64,17 @@ spec = do
         top <- requireRecipe recipes "default"
         depNames top `shouldBe` ["sub::leaf"]
 
+    context "variable-substitution body tokens" $ do
+      -- Regression for juspay/justci#32: just emits each {{ var }}
+      -- substitution as a nested JSON array (e.g. [["variable","name"]])
+      -- inside the recipe body alongside literal-string tokens. The
+      -- decoder must accept either shape per-token or it'll reject every
+      -- justfile that uses variable substitution.
+      it "decodes a recipe body containing a variable-reference token" $ do
+        recipes <- decodeOrFail variableTokenJson
+        r <- requireRecipe recipes "run"
+        hasBody r `shouldBe` True
+
     context "errors" $ do
       it "returns ParseError on malformed JSON" $
         case parseDump "{ not valid json" of
@@ -105,6 +116,15 @@ isParallel _ = False
 topLevelOnlyJson :: BS.ByteString
 topLevelOnlyJson =
   "{\"recipes\":{\"solo\":{\"namepath\":\"solo\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[[\"echo solo\"]]}},\"modules\":{}}"
+
+-- | A recipe whose body contains a {{ variable }} substitution. just
+-- emits each substitution as a nested JSON array of the form
+-- @[["variable", "<name>"]]@ in place of a literal-string token, so
+-- @body[0]@ here is a one-line list with two tokens: the substitution
+-- array and a trailing string literal. Reproduces juspay/justci#32.
+variableTokenJson :: BS.ByteString
+variableTokenJson =
+  "{\"recipes\":{\"run\":{\"namepath\":\"run\",\"dependencies\":[],\"parameters\":[],\"attributes\":[],\"body\":[[[[\"variable\",\"nix_shell\"]],\" sh -c 'echo done'\"]]}},\"modules\":{}}"
 
 -- | A top-level recipe whose dep is already qualified to a submodule
 -- recipe (e.g. a top-level @ci: sub::leaf@). Qualification must trust

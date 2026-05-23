@@ -166,6 +166,11 @@ instance FromJSON Attribute where
 -- dependencies, formal parameters, recipe-level attributes, and the
 -- recipe body (each outer element is one source line; lines are
 -- preserved as a list-of-tokens just to mirror just's @body@ shape).
+-- Tokens stay as raw 'Value' because just emits mixed shapes per token —
+-- bare strings for literals, JSON arrays like @["variable", "name"]@ for
+-- @{{ … }}@ substitutions — and the runner only needs the field as a
+-- non-empty marker, not as text. A typed token ADT would have to enumerate
+-- every just variant and re-break on each new release for no gain here.
 -- The body distinguishes recipes that do real work from pure
 -- dependency aggregators like @ci::default@ or @ci::checks@; the
 -- runner uses 'hasBody' to drop aggregators from GH commit-status and
@@ -176,7 +181,7 @@ data Recipe = Recipe
     dependencies :: [Dep],
     parameters :: [Parameter],
     attributes :: [Attribute],
-    body :: [[Text]]
+    body :: [[Value]]
   }
   deriving stock (Generic)
   deriving anyclass (FromJSON)
