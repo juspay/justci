@@ -123,6 +123,15 @@ spec = do
           joined = summary nodes
       ("all 3 nodes succeeded" `T.isInfixOf` joined) `shouldBe` True
 
+    it "counts Skipped as not-succeeded in the bottom tally" $ do
+      -- Skipped recipes block the bottom-line "all succeeded" message
+      -- the same way Failed and Nothing do — matching verdictCode's
+      -- "exit zero iff every node Succeeded" rule, which mirrors
+      -- GitHub's "required pending = not yet met = merge blocked".
+      let nodes = [(nodeLinux "alpha", Just Succeeded), (nodeLinux "beta", Just Skipped)]
+          joined = summary nodes
+      ("1 of 2 nodes did not succeed" `T.isInfixOf` joined) `shouldBe` True
+
   -- Cross-module invariant: the two consumers of 'TerminalStatus'
   -- ('terminalToOutcome' in JustCI.Verdict, 'terminalToCommitStatus'
   -- in JustCI.CommitStatus) must agree on the per-constructor
