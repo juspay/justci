@@ -20,8 +20,8 @@
 --
 -- Read-only from the runner's perspective: the user edits the JSON
 -- file(s) by hand. 'loadGlobalHosts' / 'loadRepoHosts' read each layer
--- (dropping unknown keys); 'JustCI.Pipeline.resolveHosts' composes the
--- two with the CLI @--host@ overlay on top. 'lookupHost' /
+-- (dropping unknown keys); 'resolveHosts' composes the two with the
+-- CLI @--host@ overlay on top. 'lookupHost' /
 -- 'hostsPlatforms' query the resolved result. Missing entries are
 -- not an error — 'JustCI.Pipeline.pipelinePlatformsFor' silently
 -- excludes platforms with no entry from the fanout, so the user
@@ -60,7 +60,7 @@ import System.FilePath ((</>))
 import System.IO.Error (isDoesNotExistError)
 
 -- | An SSH destination — anything @ssh@ accepts as @[user@]host[:port]@.
--- Opaque; minted only by 'hostFromText' or via JSON decode in 'loadHosts'.
+-- Opaque; minted only by 'hostFromText' or via JSON decode in 'loadHostsFrom'.
 newtype Host = Host Text
   deriving stock (Show, Eq, Ord)
   deriving newtype (Display)
@@ -68,7 +68,7 @@ newtype Host = Host Text
 -- | Smart constructor — named so every minting site is searchable. No
 -- validation today; the @ssh@ subprocess is the source of truth on
 -- whether the string is a valid destination. Two production minting
--- sites: 'loadHosts' (JSON decode) and "JustCI.CLI" (the @--host PLATFORM=ADDR@
+-- sites: 'loadHostsFrom' (JSON decode) and "JustCI.CLI" (the @--host PLATFORM=ADDR@
 -- override flag).
 hostFromText :: Text -> Host
 hostFromText = Host
@@ -116,7 +116,7 @@ repoHostsPath = do
   cwd <- getCurrentDirectory
   pure (cwd </> ".justci" </> "hosts.json")
 
--- | Why 'loadHosts' couldn't return a 'Hosts' value. Both failure
+-- | Why 'loadHostsFrom' couldn't return a 'Hosts' value. Both failure
 -- modes carry the hosts.json path so the display rendering points
 -- the user at the file they need to fix.
 data HostsLoadError
