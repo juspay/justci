@@ -49,7 +49,6 @@ module JustCI.CommitStatus
 
     -- * Naming convention
     contextForNode,
-    shouldPostStatus,
     isRequiredCheck,
     isBodyBearing,
 
@@ -62,6 +61,11 @@ module JustCI.CommitStatus
     -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the wire-status
     -- → @(CommitStatus, description)@ classifier's branches stay locked,
     -- including the path-omitting did-not-run cases (issue #26).
+    shouldPostStatus,
+    -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the
+    -- posting-policy predicate's branches stay locked. Production
+    -- code consults this via 'postStatusFor''s internal guard;
+    -- no external module imports it directly.
     formatElapsed,
     -- ^ Exposed for "test.JustCI.CommitStatusSpec" so the human-readable
     -- duration formatter's branches stay locked.
