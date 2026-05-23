@@ -69,37 +69,46 @@ data ProcessState = ProcessState
   deriving stock (Show, Generic)
   deriving anyclass (FromJSON)
 
--- | The two terminal outcomes we distinguish at the project's
--- vocabulary layer: a node either ran-and-succeeded ('TsSucceeded')
--- or didn't ('TsFailed'). pc's wire distinguishes three terminal
--- shapes — completed-with-zero, completed-with-nonzero, skipped (dep
--- failed), errored (missed precondition) — but the project doesn't
--- treat "skipped because upstream failed" as a primitive state: the
--- cascade story is a derived property of the dep graph, not a per-node
--- classification. 'psToTerminalStatus' folds both 'PsSkipped' and
--- 'PsErrored' into 'TsFailed' at the wire boundary.
+-- | The three terminal outcomes we distinguish at the project's
+-- vocabulary layer: a node either ran-and-succeeded ('TsSucceeded'),
+-- ran-and-failed ('TsFailed'), or never ran because an upstream dep
+-- failed ('TsSkipped'). pc's wire has four terminal shapes
+-- (completed-with-zero, completed-with-nonzero, skipped, errored);
+-- 'psToTerminalStatus' folds completed-non-zero and errored into
+-- 'TsFailed' (both are this-node-broke) and keeps skipped separate as
+-- 'TsSkipped' (this-node-didn't-run-because-of-someone-else).
 --
--- Owned here (rather than in "JustCI.CommitStatus" or "JustCI.Verdict") so
--- both downstreams derive their own vocabulary from the same base
--- predicate. Keeps the GitHub-status mapping and the local verdict's
--- outcome classification in agreement by construction without
--- forcing either to import the other.
-data TerminalStatus = TsSucceeded | TsFailed
+-- Owned here (rather than in "JustCI.CommitStatus" or "JustCI.Verdict")
+-- so both downstreams derive their own surface vocabulary from the
+-- same base predicate: the GH commit-status surface projects
+-- 'TsSkipped' to @Pending@+"Skipped" and the local CLI verdict
+-- projects it to a @Skipped@ 'JustCI.Verdict.RecipeOutcome', without
+-- either consumer importing the other. The cross-module invariant —
+-- every 'TerminalStatus' value maps to exactly one 'CommitStatus' and
+-- one 'RecipeOutcome' — is locked down by the agreement test in
+-- @VerdictSpec@.
+data TerminalStatus = TsSucceeded | TsFailed | TsSkipped
   deriving stock (Show, Eq, Bounded, Enum)
 
 -- | The single ground-truth classifier of a 'ProcessState' event into
 -- a terminal outcome. Non-terminal events ('PsRunning', 'PsOther')
 -- return 'Nothing'; downstreams add their own non-terminal handling
 -- ('JustCI.CommitStatus' posts @Pending@ on 'PsRunning', for example).
--- 'PsSkipped' and 'PsErrored' both fold into 'TsFailed' — those wire
--- states describe upstream-failure cascades, which the project models
--- as graph properties on top of "this node failed" rather than as
--- their own state.
+--
+-- 'PsSkipped' and 'PsErrored' are kept asymmetric on purpose. Both
+-- mean "this node didn't run," but the reason differs: 'PsSkipped'
+-- is a cascade (some upstream dep failed and pc decided not to
+-- start this one; the recipe itself is probably fine), while
+-- 'PsErrored' is a launch failure (pc tried to start the process
+-- and the start itself broke — a real defect in this recipe's
+-- launch path). The two projections downstream reflect that:
+-- 'TsSkipped' → @Pending@/@Skipped@, 'TsFailed' (from 'PsErrored') →
+-- @Failure@/@Failed@.
 psToTerminalStatus :: ProcessState -> Maybe TerminalStatus
 psToTerminalStatus ps = case (ps.status, ps.exit_code) of
   (PsCompleted, 0) -> Just TsSucceeded
   (PsCompleted, _) -> Just TsFailed
-  (PsSkipped, _) -> Just TsFailed
+  (PsSkipped, _) -> Just TsSkipped
   (PsErrored, _) -> Just TsFailed
   _ -> Nothing
 

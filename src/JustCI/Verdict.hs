@@ -9,11 +9,12 @@
 -- on the map for the pipeline's overall 'ExitCode' and 'verdictSummary'
 -- for the printable summary.
 --
--- 'RecipeOutcome' is the verdict's vocabulary: two terminal cases.
--- Absence of a node from the event map (encoded as 'Nothing' in the
--- pre-seeded map below) means "the observer never saw a terminal
--- state for this node" — a non-success that flows into 'verdictCode'
--- without needing its own 'RecipeOutcome' constructor.
+-- 'RecipeOutcome' is the verdict's vocabulary: three terminal cases
+-- (succeeded, failed, skipped-because-upstream-failed). Absence of a
+-- node from the event map (encoded as 'Nothing' in the pre-seeded
+-- map below) means "the observer never saw a terminal state for this
+-- node" — a non-success that flows into 'verdictCode' without
+-- needing its own 'RecipeOutcome' constructor.
 module JustCI.Verdict
   ( -- * Outcome values
     RecipeOutcome (..),
@@ -51,19 +52,23 @@ import JustCI.Platform (Platform)
 import JustCI.ProcessCompose.Events (ProcessState (..), TerminalStatus (..), psToTerminalStatus)
 import System.Exit (ExitCode (..), exitWith)
 
--- | The terminal outcome of one node: ran-and-succeeded, or didn't.
--- "Didn't reach a terminal event at all" (pc crashed before
--- scheduling, network drop on the observer) is *not* a 'RecipeOutcome'
+-- | The terminal outcome of one node: ran-and-succeeded,
+-- ran-and-failed, or didn't-run-because-upstream-failed. "Didn't
+-- reach a terminal event at all" (pc crashed before scheduling,
+-- network drop on the observer) is *not* a 'RecipeOutcome'
 -- constructor — it's the absence of a fold value in the per-node
--- 'Maybe' slot of the 'Outcomes' map. "Skipped because the upstream
--- failed" isn't a constructor either — that's a graph property of
--- the dep map combined with the outcomes, not a per-node primitive.
-data RecipeOutcome = Succeeded | Failed
+-- 'Maybe' slot of the 'Outcomes' map. 'Skipped' mirrors the GH
+-- surface's @Pending@+"Skipped" so the CLI summary and the PR
+-- checks page describe a cascade the same way; the wire-side
+-- classification that produces both is owned by
+-- 'JustCI.ProcessCompose.Events.psToTerminalStatus'.
+data RecipeOutcome = Succeeded | Failed | Skipped
   deriving stock (Show, Eq)
 
 instance Display RecipeOutcome where
   displayBuilder Succeeded = "succeeded"
   displayBuilder Failed = "failed"
+  displayBuilder Skipped = "skipped"
 
 -- | The mutable per-run state the observer folds into. Each scheduled
 -- 'NodeId' starts with 'Nothing' (no terminal event yet) and flips to
@@ -112,10 +117,16 @@ recordOutcome (Outcomes ref) node ps =
     -- would only confuse the summary).
     atomicModifyIORef' ref (\m -> (Map.adjust (const (Just o)) node m, ()))
 
--- | Verdict-side relabeling of the two terminal classifications.
+-- | Verdict-side relabeling of the three terminal classifications.
+-- The mirror of "JustCI.CommitStatus.terminalToCommitStatus" — both
+-- functions project from 'TerminalStatus' so the GH check page and
+-- the CLI summary cannot disagree on a per-node outcome. The
+-- agreement test in @VerdictSpec@ iterates @[minBound..maxBound]@
+-- and locks the three-way mapping down.
 terminalToOutcome :: TerminalStatus -> RecipeOutcome
 terminalToOutcome TsSucceeded = Succeeded
 terminalToOutcome TsFailed = Failed
+terminalToOutcome TsSkipped = Skipped
 
 -- | End-of-run convenience: snapshot the accumulator, print the
 -- per-recipe summary to stdout, and exit with the derived code.
@@ -140,9 +151,13 @@ readOutcomes :: Outcomes -> IO (Map NodeId (Maybe RecipeOutcome))
 readOutcomes (Outcomes ref) = readIORef ref
 
 -- | The pipeline's exit code: 'ExitSuccess' iff every node in the
--- snapshot finished @'Just' 'Succeeded'@; anything else — @Just Failed@
--- or 'Nothing' (no terminal event) — flips it to 'ExitFailure' 1.
--- Pure; trivial to test against handcrafted maps.
+-- snapshot finished @'Just' 'Succeeded'@; anything else —
+-- @'Just' 'Failed'@, @'Just' 'Skipped'@, or 'Nothing' (no terminal
+-- event) — flips it to 'ExitFailure' 1. Skipped counts as non-zero
+-- to match GitHub's required-check semantics (a 'Pending' check is
+-- "not yet met" and blocks merge), so the local exit code and the
+-- PR's merge gate agree. Pure; trivial to test against handcrafted
+-- maps.
 verdictCode :: Map NodeId (Maybe RecipeOutcome) -> ExitCode
 verdictCode outcomes
   | all (== Just Succeeded) (Map.elems outcomes) = ExitSuccess
@@ -235,13 +250,18 @@ verdictSummary mkHost outcomes =
     renderOutcome Nothing = "did not run"
 
     -- Bottom-line tally counts every scheduled node (setup + recipes)
-    -- that didn't reach 'Just Succeeded'.
+    -- that didn't reach 'Just Succeeded' — i.e. 'Just Failed',
+    -- 'Just Skipped', or 'Nothing' (no terminal event). The three
+    -- cases render distinctly per-recipe ("failed" / "skipped" /
+    -- "did not run") but collapse into one count here because the
+    -- bottom-line message ("N of M nodes did not succeed") is
+    -- itself the union over them.
     totalCount = Map.size outcomes
-    failedCount = Map.size (Map.filter (/= Just Succeeded) outcomes)
+    notSucceededCount = Map.size (Map.filter (/= Just Succeeded) outcomes)
     verdictLine
-      | failedCount == 0 = "all " <> tshow totalCount <> " nodes succeeded"
+      | notSucceededCount == 0 = "all " <> tshow totalCount <> " nodes succeeded"
       | otherwise =
-          tshow failedCount
+          tshow notSucceededCount
             <> " of "
             <> tshow totalCount
             <> " nodes did not succeed"

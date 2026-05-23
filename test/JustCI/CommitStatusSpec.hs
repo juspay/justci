@@ -65,14 +65,22 @@ spec = do
       describePost (ps PsCompleted 1) (Just 5) logP
         `shouldBe` Just (Failure, "Failed (5s): " <> logPT)
 
-    it "posts Failure with a path-free 'Skipped (upstream failed)' for PsSkipped" $
-      -- Regression for issue #26: previously this embedded the recipe's
-      -- log path even though the recipe never ran and the file never
-      -- existed on disk.
+    it "posts Pending with a path-free 'Skipped' for PsSkipped" $
+      -- Cascade case: this recipe never ran because an upstream dep
+      -- failed. Posting @Pending@ (not @Failure@) keeps the PR-side
+      -- presentation honest — we have no evidence about this recipe
+      -- itself, so it stays "not yet met" instead of being painted
+      -- red. Regression for issue #26: previously this embedded the
+      -- recipe's log path even though the recipe never ran and the
+      -- file never existed on disk.
       describePost (ps PsSkipped 0) Nothing logP
-        `shouldBe` Just (Failure, "Skipped (upstream failed)")
+        `shouldBe` Just (Pending, "Skipped")
 
     it "posts Failure with a path-free 'Errored (did not start)' for PsErrored" $
+      -- Launch failure (pc tried to start the process and couldn't) —
+      -- this *is* a defect in the recipe's launch path, not a
+      -- cascade, so it stays red. Asymmetric with PsSkipped on
+      -- purpose.
       describePost (ps PsErrored 0) Nothing logP
         `shouldBe` Just (Failure, "Errored (did not start)")
 
@@ -80,7 +88,7 @@ spec = do
       -- Even if the caller passes an elapsed value, did-not-run states
       -- suppress it — there's no meaningful runtime to report.
       describePost (ps PsSkipped 0) (Just 99) logP
-        `shouldBe` Just (Failure, "Skipped (upstream failed)")
+        `shouldBe` Just (Pending, "Skipped")
       describePost (ps PsErrored 0) (Just 99) logP
         `shouldBe` Just (Failure, "Errored (did not start)")
 
