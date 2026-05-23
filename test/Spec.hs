@@ -3,6 +3,7 @@
 module Main (main) where
 
 import qualified JustCI.CommitStatusSpec
+import qualified JustCI.HostsSpec
 import qualified JustCI.JustfileSpec
 import qualified JustCI.NodeSpec
 import qualified JustCI.PlatformSpec
@@ -14,6 +15,7 @@ import Test.Hspec (hspec)
 main :: IO ()
 main = hspec $ do
   JustCI.CommitStatusSpec.spec
+  JustCI.HostsSpec.spec
   JustCI.JustfileSpec.spec
   JustCI.NodeSpec.spec
   JustCI.PlatformSpec.spec

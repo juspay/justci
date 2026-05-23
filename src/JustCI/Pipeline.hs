@@ -52,7 +52,7 @@ import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, ro
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
-import JustCI.Hosts (Hosts, loadHosts, lookupHost, mergeHostOverrides)
+import JustCI.Hosts (Host, Hosts, HostsLoadError, hostsToList, loadGlobalHosts, loadRepoHosts, lookupHost, mergeHostOverrides)
 import JustCI.Justfile (Recipe, RecipeName, fetchDump, recipeCommand)
 import qualified JustCI.Justfile as J
 import JustCI.LogPath (logDirFor, logPathFor, platformDir)
@@ -153,6 +153,33 @@ withCiLock lockPath sockFile action =
         action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
 
+-- | Resolve the layered host config used by every entry point:
+-- global @~\/.config\/justci\/hosts.json@ ◁ per-repo
+-- @\$PWD\/.justci\/hosts.json@ ◁ CLI @--host@ overrides. Rightmost
+-- wins. The two file layers each surface their own
+-- 'JustCI.Hosts.HostsLoadError' (carrying the offending path) so a
+-- malformed repo file points at the repo file in the error.
+--
+-- Every entry point routes through this — including 'runGraph',
+-- 'runDumpYaml', and 'runProtect' — so the documented invariant
+-- "dump-yaml shows what run does" holds when a repo file is
+-- committed. The non-run entries pass @[]@ for the CLI layer;
+-- @--host@ is intentionally ephemeral and shouldn't affect
+-- @justci protect@'s required-checks list.
+resolveHosts :: [(Platform, Host)] -> IO (Either HostsLoadError Hosts)
+resolveHosts cliOverrides =
+  loadGlobalHosts >>= \case
+    Left err -> pure (Left err)
+    Right global ->
+      loadRepoHosts >>= \case
+        Left err -> pure (Left err)
+        Right repo ->
+          pure
+            . Right
+            . mergeHostOverrides cliOverrides
+            . mergeHostOverrides (hostsToList repo)
+            $ global
+
 -- | Local mode: live working tree, no GitHub status posts, no per-recipe
 -- log routing. The observer still runs — its only consumer is the
 -- verdict accumulator, which gives developer runs the same end-of-run
@@ -171,7 +198,7 @@ withCiLock lockPath sockFile action =
 -- only.
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
-  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
+  hosts <- dieOnLeft =<< resolveHosts opts.hostOverrides
   (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
   outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
@@ -211,7 +238,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   dieOnLeft =<< ensureCleanTree
   repo <- dieOnLeft =<< viewRepo
   sha <- dieOnLeft =<< resolveSha
-  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
+  hosts <- dieOnLeft =<< resolveHosts opts.hostOverrides
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
     (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
@@ -245,7 +272,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
 -- 'runStrict' need the runtime-artifact paths.
 runGraph :: IO ()
 runGraph = do
-  hosts <- dieOnLeft =<< loadHosts
+  hosts <- dieOnLeft =<< resolveHosts []
   (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   TIO.putStrLn (toMermaid (processGraph pc))
 
@@ -255,7 +282,7 @@ runGraph = do
 -- @hosts.json@ has no entry for the other platform.
 runDumpYaml :: IO ()
 runDumpYaml = do
-  hosts <- dieOnLeft =<< loadHosts
+  hosts <- dieOnLeft =<< resolveHosts []
   (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
   BS.putStr (Y.encode pc)
 
@@ -281,7 +308,7 @@ runDumpYaml = do
 -- the GitHub UI before @justci protect@ is meaningful.
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
-  hosts <- dieOnLeft =<< loadHosts
+  hosts <- dieOnLeft =<< resolveHosts []
   (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
   let contexts = contextForNode <$> filter (isPostable recipes) (G.vertexList nodeGraph)
   case contexts of
@@ -585,7 +612,7 @@ commandForNode sha localPlat hosts node = case (node, lookupHost plat hosts) of
 --
 -- 'JustCI.Verdict' still receives an opaque @NodeId -> Text@ resolver,
 -- so its independence from the 'JustCI.Hosts' vocabulary is preserved
--- without the cost of a second 'loadHosts' call.
+-- without the cost of a second 'resolveHosts' call.
 hostFor :: Hosts -> NodeId -> T.Text
 hostFor hosts n = case lookupHost (nodePlatform n) hosts of
   Just h -> display h
