@@ -80,13 +80,18 @@ data ProcessState = ProcessState
 --
 -- Owned here (rather than in "JustCI.CommitStatus" or "JustCI.Verdict")
 -- so both downstreams derive their own surface vocabulary from the
--- same base predicate: the GH commit-status surface projects
--- 'TsSkipped' to @Pending@+"Skipped" and the local CLI verdict
--- projects it to a @Skipped@ 'JustCI.Verdict.RecipeOutcome', without
--- either consumer importing the other. The cross-module invariant —
--- every 'TerminalStatus' value maps to exactly one 'CommitStatus' and
--- one 'RecipeOutcome' — is locked down by the agreement test in
--- @VerdictSpec@.
+-- same base predicate: the local CLI verdict projects 'TsSkipped' to
+-- a @Skipped@ 'JustCI.Verdict.RecipeOutcome', and the GH commit-status
+-- surface posts /nothing/ for 'TsSkipped' — branch protection's
+-- "Expected — Waiting for status to be reported" placeholder is the
+-- canonical receptacle for "required but unreported," and the
+-- 'JustCI.CommitStatus.describePost' path short-circuits to 'Nothing'
+-- on 'PsSkipped' rather than fabricating a parallel @Pending@+"Skipped"
+-- row. The cross-module invariant — every 'TerminalStatus' value maps
+-- to exactly one 'CommitStatus' and one 'RecipeOutcome' — is locked
+-- down by the agreement test in @VerdictSpec@; the 'TsSkipped' arm of
+-- 'JustCI.CommitStatus.terminalToCommitStatus' is preserved for that
+-- totality contract even though no production path reaches it.
 data TerminalStatus = TsSucceeded | TsFailed | TsSkipped
   deriving stock (Show, Eq, Bounded, Enum)
 
@@ -102,8 +107,10 @@ data TerminalStatus = TsSucceeded | TsFailed | TsSkipped
 -- 'PsErrored' is a launch failure (pc tried to start the process
 -- and the start itself broke — a real defect in this recipe's
 -- launch path). The two projections downstream reflect that:
--- 'TsSkipped' → @Pending@/@Skipped@, 'TsFailed' (from 'PsErrored') →
--- @Failure@/@Failed@.
+-- 'TsSkipped' is rendered on the GH side by branch protection's
+-- "Expected — Waiting" placeholder (no justci-posted row) and on
+-- the CLI side as @Skipped@, while 'TsFailed' (from 'PsErrored')
+-- posts @Failure@+"Errored (did not start)" and renders as @Failed@.
 psToTerminalStatus :: ProcessState -> Maybe TerminalStatus
 psToTerminalStatus ps = case (ps.status, ps.exit_code) of
   (PsCompleted, 0) -> Just TsSucceeded
