@@ -31,12 +31,14 @@ import JustCI.Hosts (Host, hostFromText)
 import JustCI.Justfile (RecipeName, recipeNameFromText)
 import JustCI.Node (DagSelection (..), DepsMode (..), NodeSelector, SelectorMode (..), parseSelector)
 import JustCI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
+import JustCI.Transport (defaultCacheTtlHours)
 import Options.Applicative
   ( Parser,
     ParserInfo,
     ParserResult,
     ReadM,
     argument,
+    auto,
     defaultPrefs,
     eitherReader,
     execParserPure,
@@ -50,10 +52,12 @@ import Options.Applicative
     metavar,
     option,
     progDesc,
+    showDefault,
     str,
     strOption,
     subparser,
     switch,
+    value,
     (<**>),
   )
 import qualified Options.Applicative as O (command)
@@ -127,7 +131,12 @@ data ProtectOpts = ProtectOpts
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
-    dagSelection :: DagSelection
+    dagSelection :: DagSelection,
+    -- | TTL in hours for per-SHA dirs under the remote cache root.
+    -- @0@ disables eviction; the current run's dir is never evicted.
+    -- Threaded to 'JustCI.Transport.remoteEvictCacheShell' via
+    -- 'JustCI.Pipeline.buildProcessCompose'. See juspay\/justci#39.
+    cacheTtlHours :: Int
   }
 
 -- | Parse argv and return the structured 'Args' alongside the raw
@@ -214,6 +223,14 @@ runOptsParser =
           )
       )
     <*> dagSelectionParser
+    <*> option
+      auto
+      ( long "cache-ttl-hours"
+          <> metavar "N"
+          <> value defaultCacheTtlHours
+          <> showDefault
+          <> help "On every remote setup, prune per-SHA cache dirs under $JUSTCI_CACHE_DIR (~/.local/state/justci by default) older than N hours. 0 disables eviction. The current run's dir is never evicted. See juspay/justci#39."
+      )
 
 -- | Parse @--root@ + positional selectors + @--no-deps@ into a single
 -- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so

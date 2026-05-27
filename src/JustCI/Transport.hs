@@ -34,6 +34,9 @@ module JustCI.Transport
 
     -- * SSH prefix
     remoteRunner,
+
+    -- * Cache eviction
+    defaultCacheTtlHours,
   )
 where
 
@@ -57,12 +60,24 @@ import JustCI.Platform (Platform)
 -- because that'd add a round trip on every run). On a cache hit
 -- the wasted bandwidth is a few MB of bundle bytes discarded into
 -- @/dev/null@ on the remote — fine.
-sshSetupCommand :: Host -> Sha -> Platform -> Text
-sshSetupCommand host sha targetPlat =
+--
+-- @ttlHours@ is interpolated into a prepended eviction snippet
+-- ('remoteEvictCacheShell') so the remote prunes stale per-SHA cache
+-- dirs on every setup. Composed into the same SSH call to avoid a
+-- second round-trip; @ttlHours == 0@ makes the eviction a no-op.
+--
+-- @set -e@ is emitted exactly once at the head of the composed shell
+-- text. The two snippet helpers are pure statement sequences — owning
+-- the strict-mode flag is the combiner's job. A future change like
+-- adding @set -o pipefail@ for the eviction pipeline edits one site.
+sshSetupCommand :: Host -> Sha -> Platform -> Int -> Text
+sshSetupCommand host sha targetPlat ttlHours =
   shipJustDrv r targetPlat
     <> " && git bundle create - --all 2>/dev/null | "
     <> r
-    <> " '"
+    <> " 'set -e ; "
+    <> remoteEvictCacheShell ttlHours sha
+    <> " ; "
     <> remoteSetupShell sha targetPlat
     <> "'"
   where
@@ -91,16 +106,25 @@ sshRecipeCommand host sha targetPlat r' =
 remoteRunner :: Host -> Text
 remoteRunner host = "ssh -T " <> display host
 
--- | The shared checkout path on the remote, deterministic from
--- @(short-sha, platform)@. Resolved at the *remote* shell:
+-- | The default TTL (in hours) applied to per-SHA cache dirs on
+-- every remote setup. Lives next to 'remoteEvictCacheShell' — the
+-- mechanism the number governs — so a change to the eviction policy
+-- only edits this module. Consumed by:
 --
--- @
+--   * "JustCI.CLI"'s @--cache-ttl-hours@ parser as the @value@ default
+--   * "JustCI.Pipeline"'s @runGraph@ \/ @runDumpYaml@ as the literal
+--     embedded in inspection output
+--
+-- Sharing the constant avoids the three-literal drift risk that
+-- prompted extracting it. See juspay\/justci#39.
+defaultCacheTtlHours :: Int
+defaultCacheTtlHours = 48
 
--- ${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}/\<short-sha\>/\<platform\>
--- @
---
--- The setup node clones into @\<cachedRunDir\>\/src@; recipe nodes
--- @cd@ into the same path.
+-- | The remote cache prefix — the directory holding every
+-- @\<short-sha\>\/\<platform\>\/@ dir. Single source of truth for the
+-- path expansion: 'cachedRunDir' joins per-run segments onto it, and
+-- 'remoteEvictCacheShell' uses it as the prune scope. If the prefix
+-- ever gains a segment, both call sites move together.
 --
 -- Why not @~\/.cache\/justci\/...@ — biome's project scanner has a
 -- case-sensitive @.cache@ filter on /any/ ancestor directory, so a
@@ -113,30 +137,42 @@ remoteRunner host = "ssh -T " <> display host
 -- @JUSTCI_CACHE_DIR@ → @XDG_STATE_HOME@ → @\$HOME/.local/state@ — lets
 -- runners with restricted writable homes opt in explicitly without
 -- having to set XDG vars project-wide. See juspay\/justci#21.
---
--- Across runs against the same SHA the directory persists, so
--- re-runs (e.g. @justci run e2e@ after fixing a flake) skip the
--- bundle+clone entirely. Garbage collection is the user's job —
--- @rm -rf ~\/.local\/state\/justci@ (or whatever override resolves to)
--- when disk pressure warrants.
+cacheRoot :: Text
+cacheRoot = "${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}"
 
+-- | The per-@(short-sha, platform)@ cache dir on the remote, joined
+-- onto 'cacheRoot'. The setup node clones into @\<cachedRunDir\>\/src@;
+-- recipe nodes @cd@ into the same path. Rationale for the prefix
+-- structure (XDG, biome avoidance, two-level override) lives on
+-- 'cacheRoot'.
 cachedRunDir :: Sha -> Platform -> Text
 cachedRunDir sha targetPlat =
-  "${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}/"
-    <> T.take shortShaLen (display sha)
+  cacheRoot
+    <> "/"
+    <> shortSha sha
     <> "/"
     <> display targetPlat
+
+-- | The abbreviated SHA string used as a path segment by both
+-- 'cachedRunDir' (per-run cache dir) and 'remoteEvictCacheShell'
+-- (exclusion guard for the current run). 'shortShaLen' is the shared
+-- prefix length (also consumed by "JustCI.LogPath" on the local side).
+shortSha :: Sha -> Text
+shortSha = T.take shortShaLen . display
 
 -- | The remote-side shell snippet the setup node sends over ssh.
 -- Single-quoted on the way through so the local shell leaves @$DIR@
 -- and friends alone; the remote shell expands them. Cache-hit path
 -- short-circuits with @cat > /dev/null@ to consume the bundle bytes
 -- the local side is already piping.
+--
+-- Pure statement sequence — the @set -e@ that this used to emit is
+-- now owned by 'sshSetupCommand' so the composed script has one
+-- strict-mode declaration, not one per fragment.
 remoteSetupShell :: Sha -> Platform -> Text
 remoteSetupShell sha targetPlat =
   T.intercalate "; " $
-    [ "set -e",
-      "DIR=" <> cachedRunDir sha targetPlat
+    [ "DIR=" <> cachedRunDir sha targetPlat
     ]
       <> [ "if [ -d \"$DIR/src\" ]; then cat > /dev/null; exit 0; fi",
            "mkdir -p \"$DIR\"",
@@ -146,3 +182,49 @@ remoteSetupShell sha targetPlat =
            "cd src",
            "git -c advice.detachedHead=false checkout --quiet " <> display sha
          ]
+
+-- | Prune per-SHA cache dirs under 'cacheRoot' whose mtime is older
+-- than @ttlHours@. Composed before 'remoteSetupShell' in the same SSH
+-- call so eviction always runs, including on cache-hit reruns (the
+-- setup snippet would otherwise short-circuit before any cleanup).
+--
+-- The current run's @\<short-sha\>\/@ dir is excluded by @! -path@ so
+-- a concurrent setup from a separate orchestrator targeting the same
+-- remote can't delete the clone the other is populating. Within one
+-- pipeline this race can't happen — 'JustCI.Fanout.fanOut' emits
+-- exactly one setup node per remote — but across distinct @justci run@
+-- invocations on different checkouts (or different machines) hitting
+-- one shared remote, the exclusion is the only thing preventing a
+-- TTL-past dir from being torn out from under a replay.
+--
+-- @ttlHours <= 0@ disables eviction. The shell-level @[ -gt 0 ]@
+-- guard also rejects non-numeric env-var injection if the operator
+-- ever wraps this with a wrapper script.
+--
+-- Eviction is best-effort: @2>\/dev\/null || true@ makes rm failures
+-- non-fatal. A stale dir that can't be deleted (permissions, read-only
+-- mount) is silently skipped — the current run still proceeds. Eviction
+-- errors are not worth aborting a CI pipeline over; the operator can
+-- clean up manually if disk pressure becomes an issue.
+--
+-- Portability: @-mmin@, @-mindepth@, @-maxdepth@, @-path@, @!@, and
+-- @-exec ... {} +@ are all in POSIX/BSD find (verified against
+-- FreeBSD's find(1)); macOS remotes are covered.
+--
+-- Pure statement sequence — the @set -e@ that this used to emit is
+-- now owned by 'sshSetupCommand' so the composed script has one
+-- strict-mode declaration, not one per fragment.
+remoteEvictCacheShell :: Int -> Sha -> Text
+remoteEvictCacheShell ttlHours sha =
+  T.intercalate
+    "; "
+    [ "ROOT=" <> cacheRoot,
+      "CURRENT=\"$ROOT/" <> shortSha sha <> "\"",
+      "HOURS=" <> display ttlHours,
+      "if [ \"$HOURS\" -gt 0 ] && [ -d \"$ROOT\" ]; then "
+        <> "find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d "
+        <> "-mmin +$((HOURS * 60)) "
+        <> "! -path \"$CURRENT\" "
+        <> "-exec rm -rf -- {} + 2>/dev/null || true ; "
+        <> "fi"
+    ]

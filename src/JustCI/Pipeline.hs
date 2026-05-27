@@ -61,7 +61,7 @@ import JustCI.Platform (Platform, localPlatform)
 import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, processNames, runProcessCompose, runProcessComposeClient, toProcessCompose)
 import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
-import JustCI.Transport (sshRecipeCommand, sshSetupCommand)
+import JustCI.Transport (defaultCacheTtlHours, sshRecipeCommand, sshSetupCommand)
 import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
 import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
 import System.Exit (ExitCode, die)
@@ -172,7 +172,7 @@ withCiLock lockPath sockFile action =
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun
+  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun opts.cacheTtlHours
   outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
@@ -214,7 +214,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir)
+    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir) opts.cacheTtlHours
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
@@ -245,7 +245,11 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
-  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
+  -- DumpRun emits structure-only output; the TTL is a body field on
+  -- the rendered SSH command, irrelevant to graph topology. Pass the
+  -- shared default so the embedded number matches what the real run
+  -- would use by default (operators override per-invocation).
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -255,7 +259,10 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun
+  -- See 'runGraph' for why the default is fine here: the dumped YAML
+  -- embeds the TTL number for inspection; the actual run uses
+  -- whatever @--cache-ttl-hours@ resolves to.
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   BS.putStr (Y.encode pc)
 
 -- | Branch-protection helper: read the canonical DAG, extract the
@@ -523,8 +530,8 @@ buildNodeGraph hosts sel = do
 -- depending on whether its platform matches the runner's; the
 -- 'JustCI.Transport' builders are the only site that know SSH command
 -- shapes.
-buildProcessCompose :: Hosts -> DagSelection -> RunMode -> IO (Either BuildGraphError (ProcessCompose, Map.Map RecipeName Recipe))
-buildProcessCompose hosts sel mode = do
+buildProcessCompose :: Hosts -> DagSelection -> RunMode -> Int -> IO (Either BuildGraphError (ProcessCompose, Map.Map RecipeName Recipe))
+buildProcessCompose hosts sel mode cacheTtlHours = do
   result <- buildNodeGraph hosts sel
   case result of
     Left err -> pure (Left err)
@@ -546,7 +553,7 @@ buildProcessCompose hosts sel mode = do
         DumpRun -> pure shaPlaceholder
         _ | hasRemote -> dieOnLeft =<< resolveSha
         _ -> pure shaPlaceholder
-      let mkCommand = commandForNode sha localPlat hosts
+      let mkCommand = commandForNode sha localPlat hosts cacheTtlHours
           (yamlWorkingDir, yamlLogLocation) = yamlPathsFor mode
       pure (Right (toProcessCompose mkCommand yamlWorkingDir yamlLogLocation nodeGraph, recipes))
 
@@ -563,13 +570,13 @@ buildProcessCompose hosts sel mode = do
 -- @sha@ is consumed only by the SSH builders. Local-mode runs
 -- without remote lanes pass 'shaPlaceholder' as a no-op (never
 -- read — the graph has no SSH nodes).
-commandForNode :: Sha -> Platform -> Hosts -> NodeId -> T.Text
-commandForNode sha localPlat hosts node = case (node, lookupHost plat hosts) of
+commandForNode :: Sha -> Platform -> Hosts -> Int -> NodeId -> T.Text
+commandForNode sha localPlat hosts cacheTtlHours node = case (node, lookupHost plat hosts) of
   (RecipeNode r _, Nothing)
     | plat == localPlat -> recipeCommand r
     | otherwise -> hostContractError
   (RecipeNode r _, Just h) -> sshRecipeCommand h sha plat r
-  (SetupNode _, Just h) -> sshSetupCommand h sha plat
+  (SetupNode _, Just h) -> sshSetupCommand h sha plat cacheTtlHours
   -- 'fanOut' emits setup nodes only for platforms with a hosts entry,
   -- so this branch is unreachable given the invariants. Surface a
   -- contract error rather than make it a 'commandFor' input shape.
