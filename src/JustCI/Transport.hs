@@ -103,16 +103,11 @@ sshRecipeCommand host sha targetPlat r' =
 remoteRunner :: Host -> Text
 remoteRunner host = "ssh -T " <> display host
 
--- | The shared checkout path on the remote, deterministic from
--- @(short-sha, platform)@. Resolved at the *remote* shell:
---
--- @
-
--- ${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}/\<short-sha\>/\<platform\>
--- @
---
--- The setup node clones into @\<cachedRunDir\>\/src@; recipe nodes
--- @cd@ into the same path.
+-- | The remote cache prefix — the directory holding every
+-- @\<short-sha\>\/\<platform\>\/@ dir. Single source of truth for the
+-- path expansion: 'cachedRunDir' joins per-run segments onto it, and
+-- 'remoteEvictCacheShell' uses it as the prune scope. If the prefix
+-- ever gains a segment, both call sites move together.
 --
 -- Why not @~\/.cache\/justci\/...@ — biome's project scanner has a
 -- case-sensitive @.cache@ filter on /any/ ancestor directory, so a
@@ -125,18 +120,6 @@ remoteRunner host = "ssh -T " <> display host
 -- @JUSTCI_CACHE_DIR@ → @XDG_STATE_HOME@ → @\$HOME/.local/state@ — lets
 -- runners with restricted writable homes opt in explicitly without
 -- having to set XDG vars project-wide. See juspay\/justci#21.
---
--- Across runs against the same SHA the directory persists, so
--- re-runs (e.g. @justci run e2e@ after fixing a flake) skip the
--- bundle+clone entirely. Stale per-SHA dirs are pruned by
--- 'remoteEvictCacheShell' on the next setup (defaults to a 48-hour
--- TTL via @--cache-ttl-hours@); see juspay\/justci#39.
-
--- | The remote cache prefix — the directory holding every
--- @\<short-sha\>\/\<platform\>\/@ dir. Single source of truth for the
--- path expansion: 'cachedRunDir' joins per-run segments onto it, and
--- 'remoteEvictCacheShell' uses it as the prune scope. If the prefix
--- ever gains a segment, both call sites move together.
 cacheRoot :: Text
 cacheRoot = "${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}"
 
