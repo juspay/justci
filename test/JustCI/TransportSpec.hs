@@ -34,7 +34,7 @@ spec = do
   describe "sshSetupCommand" $ do
     let host = hostFromText "remote.example.com"
         sha = shaPlaceholder
-        cmd = sshSetupCommand host sha Aarch64Darwin
+        cmd = sshSetupCommand host sha Aarch64Darwin 48
 
     it "ships the just derivation first" $
       ("nix-store --export" `T.isInfixOf` cmd) `shouldBe` True
@@ -50,6 +50,27 @@ spec = do
 
     it "skips bundle+clone on cache hit" $
       ("cat > /dev/null; exit 0" `T.isInfixOf` cmd) `shouldBe` True
+
+    -- Cache eviction (juspay/justci#39): the snippet prepended before the
+    -- setup shell prunes per-SHA dirs older than the configured TTL.
+    it "interpolates the configured TTL into the eviction snippet" $
+      ("HOURS=48" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "scopes eviction to the cache root, not the per-run dir" $
+      ("ROOT=${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "excludes the current short-sha dir so concurrent setups can't evict each other" $
+      ("! -path \"$CURRENT\"" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "guards eviction behind an explicit positive-TTL check (0 disables, bad input fails loud)" $
+      ("[ \"$HOURS\" -gt 0 ]" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "uses portable -mmin (POSIX/BSD find), not a GNU-only -mtime suffix" $
+      ("-mmin +$((HOURS * 60))" `T.isInfixOf` cmd) `shouldBe` True
+
+    it "TTL=0 still emits the snippet but the guard short-circuits before find runs" $
+      let cmd0 = sshSetupCommand host sha Aarch64Darwin 0
+       in ("HOURS=0" `T.isInfixOf` cmd0) `shouldBe` True
 
   describe "sshRecipeCommand" $ do
     let host = hostFromText "remote.example.com"

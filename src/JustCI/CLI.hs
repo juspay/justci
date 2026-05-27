@@ -18,6 +18,9 @@ module JustCI.CLI
     RunOpts (..),
     ProtectOpts (..),
 
+    -- * Shared defaults
+    defaultCacheTtlHours,
+
     -- * Entry point
     parseCli,
   )
@@ -37,6 +40,7 @@ import Options.Applicative
     ParserResult,
     ReadM,
     argument,
+    auto,
     defaultPrefs,
     eitherReader,
     execParserPure,
@@ -50,14 +54,24 @@ import Options.Applicative
     metavar,
     option,
     progDesc,
+    showDefault,
     str,
     strOption,
     subparser,
     switch,
+    value,
     (<**>),
   )
 import qualified Options.Applicative as O (command)
 import System.Environment (getArgs)
+
+-- | The TTL applied to per-SHA cache dirs on every remote setup, in
+-- hours. Lives here (not in "JustCI.Transport") because the option
+-- parser's @value@ and the dump-mode call sites in "JustCI.Pipeline"
+-- ('runGraph', 'runDumpYaml') all need the same number — defining it
+-- once avoids the three-literal drift risk. See juspay\/justci#39.
+defaultCacheTtlHours :: Int
+defaultCacheTtlHours = 48
 
 -- | Parsed argv: just the chosen subcommand. All per-mode knobs live
 -- inside their subcommand's option record ('RunOpts' for @run@) —
@@ -127,7 +141,12 @@ data ProtectOpts = ProtectOpts
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
-    dagSelection :: DagSelection
+    dagSelection :: DagSelection,
+    -- | TTL in hours for per-SHA dirs under the remote cache root.
+    -- @0@ disables eviction; the current run's dir is never evicted.
+    -- Threaded to 'JustCI.Transport.remoteEvictCacheShell' via
+    -- 'JustCI.Pipeline.buildProcessCompose'. See juspay\/justci#39.
+    cacheTtlHours :: Int
   }
 
 -- | Parse argv and return the structured 'Args' alongside the raw
@@ -214,6 +233,14 @@ runOptsParser =
           )
       )
     <*> dagSelectionParser
+    <*> option
+      auto
+      ( long "cache-ttl-hours"
+          <> metavar "N"
+          <> value defaultCacheTtlHours
+          <> showDefault
+          <> help "On every remote setup, prune per-SHA cache dirs under $JUSTCI_CACHE_DIR (~/.local/state/justci by default) older than N hours. 0 disables eviction. The current run's dir is never evicted. See juspay/justci#39."
+      )
 
 -- | Parse @--root@ + positional selectors + @--no-deps@ into a single
 -- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so

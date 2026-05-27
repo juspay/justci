@@ -68,6 +68,8 @@ Every emitted process is `restart: no` and `exit_on_skipped: false`, so one fail
 
 A node whose platform doesn't match the local host runs via SSH. The runner pipes a `git bundle` through `ssh <host>`, the remote shell clones it into a tempdir, checks out the pipeline's `HEAD` SHA, and runs `just --no-deps <recipe>` there. Per-node stdout/stderr streams back over SSH and lands in `.ci/<sha>/<platform>/<recipe>.log` exactly as a local node would.
 
+The remote-side checkout lives under `$JUSTCI_CACHE_DIR` (defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/justci`) keyed by `<short-sha>/<platform>/`, persisting across runs so same-SHA reruns skip the bundle+clone. **Per-SHA dirs are pruned on every setup**: anything older than `--cache-ttl-hours` (default 48) is removed, except the current run's own dir. Set `--cache-ttl-hours 0` to disable eviction. The exclusion of the current dir means concurrent runs from separate orchestrators targeting the same remote can't evict each other's in-progress clone.
+
 Hosts go in `~/.config/justci/hosts.json`, keyed by **Nix system tuple**:
 
 ```json
@@ -99,12 +101,13 @@ Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@hos
 ### `justci run`
 
 ```
-justci run [--tui] [--host PLATFORM=ADDR ...] [--root RECIPE] [--no-deps] [RECIPE[@PLATFORM]...] [-- <args>]
+justci run [--tui] [--host PLATFORM=ADDR ...] [--root RECIPE] [--no-deps] [--cache-ttl-hours N] [RECIPE[@PLATFORM]...] [-- <args>]
 ```
 
 - `--tui` — swap process-compose's headless logger for its interactive tcell view; useful for poking at long-running pipelines locally
 - `--root RECIPE` — replace the DAG root that `[metadata("ci")]` would have picked
 - `--no-deps` — the `just`-style escape hatch: keep only the named selectors, skip their dependency closure (setup nodes still auto-included on remote platforms so the YAML doesn't reference dropped dependencies)
+- `--cache-ttl-hours N` — prune per-SHA cache dirs older than `N` hours on every remote setup (default 48). `0` disables eviction; the current run's dir is never evicted. See [_Remote builds over SSH_](#remote-builds-over-ssh).
 - positional `RECIPE[@PLATFORM]` selectors restrict the run to those nodes and their transitive deps (e.g. `justci run e2e@x86_64-linux` re-runs just that one node after a flaky `e2e` lane). _The status context (`<recipe>@<platform>`) is unchanged, so a partial re-run overwrites the same GitHub check the full run wrote._
 - anything after `--` is forwarded verbatim to `process-compose up`
 
