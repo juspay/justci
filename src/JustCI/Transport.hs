@@ -149,9 +149,16 @@ cachedRunDir :: Sha -> Platform -> Text
 cachedRunDir sha targetPlat =
   cacheRoot
     <> "/"
-    <> T.take shortShaLen (display sha)
+    <> shortSha sha
     <> "/"
     <> display targetPlat
+
+-- | The abbreviated SHA string used as a path segment by both
+-- 'cachedRunDir' (per-run cache dir) and 'remoteEvictCacheShell'
+-- (exclusion guard for the current run). 'shortShaLen' is the shared
+-- prefix length (also consumed by "JustCI.LogPath" on the local side).
+shortSha :: Sha -> Text
+shortSha = T.take shortShaLen . display
 
 -- | The remote-side shell snippet the setup node sends over ssh.
 -- Single-quoted on the way through so the local shell leaves @$DIR@
@@ -206,7 +213,7 @@ remoteEvictCacheShell ttlHours sha =
   T.intercalate
     "; "
     [ "ROOT=" <> cacheRoot,
-      "CURRENT=\"$ROOT/" <> T.take shortShaLen (display sha) <> "\"",
+      "CURRENT=\"$ROOT/" <> shortSha sha <> "\"",
       "HOURS=" <> T.pack (show ttlHours),
       "if [ \"$HOURS\" -gt 0 ] && [ -d \"$ROOT\" ]; then "
         <> "find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d "
