@@ -1,10 +1,10 @@
 lockfile_version: '1'
-generated_at: '2026-05-19T18:43:53.734493+00:00'
-apm_version: 0.14.0
+generated_at: '2026-05-27T19:19:25.042657+00:00'
+apm_version: 0.15.0
 dependencies:
 - repo_url: srid/agency
   host: github.com
-  resolved_commit: a19e96686ea20ad02e2869334f426e024565c703
+  resolved_commit: d2e2ffd0bb12f99b81d084ceca6bf99bda4b3587
   resolved_ref: master
   package_type: apm_package
   deployed_files:
@@ -25,8 +25,8 @@ dependencies:
     .claude/agents/hickey.md: sha256:10d9a4350a85752dc6658af8e0efb3d8be41803a2b6c73464e3d5b7a840435ad
     .claude/agents/lowy.md: sha256:05aff7f6a91149a42c1fb9a3ca382a6f77bc39ac8a8d45436d443dd3349fb11e
     .claude/hooks/agency/scripts/do-stop-guard.sh: sha256:cb033f86c15ffd3d09d8e4b74a61f55a70def4cc4131cc013b7368a2d23f3f33
-    .claude/rules/apm-sources.md: sha256:65640c481c347cc4edf50603f784d0b448b6395acc43419a4f8ad0c53de2db4b
-  content_hash: sha256:b4c49cbb5308a43ac20ae76f7dfa77f56a102b13625c6cc6313f801c104359ca
+    .claude/rules/apm-sources.md: sha256:0d34f182279b93803855bd7f7b27a57e7cf3117ce4291d31a46294c629ee75d5
+  content_hash: sha256:b6cf9bc23f3cb4529a8c3390e38700cf46251eb787543b994941feceb83dc7c7
 local_deployed_files:
 - .claude/rules/workflow.md
 - .claude/skills/ci
