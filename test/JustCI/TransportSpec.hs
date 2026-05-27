@@ -72,6 +72,15 @@ spec = do
       let cmd0 = sshSetupCommand host sha Aarch64Darwin 0
        in ("HOURS=0" `T.isInfixOf` cmd0) `shouldBe` True
 
+    -- Eviction must precede the setup snippet — setup short-circuits with
+    -- `exit 0` on cache hit, so a swapped order would skip eviction
+    -- forever on warm caches. `ROOT=` is unique to the eviction snippet
+    -- and `DIR=` is unique to setup, so a prefix check pins the order
+    -- without depending on whitespace or other formatting.
+    it "renders eviction before setup so cache-hit short-circuit doesn't skip the prune" $
+      let (before, _) = T.breakOn "DIR=" cmd
+       in ("ROOT=" `T.isInfixOf` before) `shouldBe` True
+
   describe "sshRecipeCommand" $ do
     let host = hostFromText "remote.example.com"
         sha = shaPlaceholder
