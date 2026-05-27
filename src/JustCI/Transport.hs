@@ -201,6 +201,12 @@ remoteSetupShell sha targetPlat =
 -- guard also rejects non-numeric env-var injection if the operator
 -- ever wraps this with a wrapper script.
 --
+-- Eviction is best-effort: @2>\/dev\/null || true@ makes rm failures
+-- non-fatal. A stale dir that can't be deleted (permissions, read-only
+-- mount) is silently skipped — the current run still proceeds. Eviction
+-- errors are not worth aborting a CI pipeline over; the operator can
+-- clean up manually if disk pressure becomes an issue.
+--
 -- Portability: @-mmin@, @-mindepth@, @-maxdepth@, @-path@, @!@, and
 -- @-exec ... {} +@ are all in POSIX/BSD find (verified against
 -- FreeBSD's find(1)); macOS remotes are covered.
@@ -219,6 +225,6 @@ remoteEvictCacheShell ttlHours sha =
         <> "find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d "
         <> "-mmin +$((HOURS * 60)) "
         <> "! -path \"$CURRENT\" "
-        <> "-exec rm -rf -- {} + ; "
+        <> "-exec rm -rf -- {} + 2>/dev/null || true ; "
         <> "fi"
     ]
