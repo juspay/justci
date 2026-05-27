@@ -140,6 +140,11 @@ remoteRunner host = "ssh -T " <> display host
 cacheRoot :: Text
 cacheRoot = "${JUSTCI_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/justci}"
 
+-- | The per-@(short-sha, platform)@ cache dir on the remote, joined
+-- onto 'cacheRoot'. The setup node clones into @\<cachedRunDir\>\/src@;
+-- recipe nodes @cd@ into the same path. Rationale for the prefix
+-- structure (XDG, biome avoidance, two-level override) lives on
+-- 'cacheRoot'.
 cachedRunDir :: Sha -> Platform -> Text
 cachedRunDir sha targetPlat =
   cacheRoot
