@@ -18,9 +18,6 @@ module JustCI.CLI
     RunOpts (..),
     ProtectOpts (..),
 
-    -- * Shared defaults
-    defaultCacheTtlHours,
-
     -- * Entry point
     parseCli,
   )
@@ -34,6 +31,7 @@ import JustCI.Hosts (Host, hostFromText)
 import JustCI.Justfile (RecipeName, recipeNameFromText)
 import JustCI.Node (DagSelection (..), DepsMode (..), NodeSelector, SelectorMode (..), parseSelector)
 import JustCI.Platform (Platform, parsePlatform, supportedPlatformsLabel)
+import JustCI.Transport (defaultCacheTtlHours)
 import Options.Applicative
   ( Parser,
     ParserInfo,
@@ -64,14 +62,6 @@ import Options.Applicative
   )
 import qualified Options.Applicative as O (command)
 import System.Environment (getArgs)
-
--- | The TTL applied to per-SHA cache dirs on every remote setup, in
--- hours. Lives here (not in "JustCI.Transport") because the option
--- parser's @value@ and the dump-mode call sites in "JustCI.Pipeline"
--- ('runGraph', 'runDumpYaml') all need the same number — defining it
--- once avoids the three-literal drift risk. See juspay\/justci#39.
-defaultCacheTtlHours :: Int
-defaultCacheTtlHours = 48
 
 -- | Parsed argv: just the chosen subcommand. All per-mode knobs live
 -- inside their subcommand's option record ('RunOpts' for @run@) —

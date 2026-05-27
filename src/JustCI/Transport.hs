@@ -34,6 +34,9 @@ module JustCI.Transport
 
     -- * SSH prefix
     remoteRunner,
+
+    -- * Cache eviction
+    defaultCacheTtlHours,
   )
 where
 
@@ -102,6 +105,20 @@ sshRecipeCommand host sha targetPlat r' =
 -- an alias from @~\/.ssh\/config@ — works as the host string.
 remoteRunner :: Host -> Text
 remoteRunner host = "ssh -T " <> display host
+
+-- | The default TTL (in hours) applied to per-SHA cache dirs on
+-- every remote setup. Lives next to 'remoteEvictCacheShell' — the
+-- mechanism the number governs — so a change to the eviction policy
+-- only edits this module. Consumed by:
+--
+--   * "JustCI.CLI"'s @--cache-ttl-hours@ parser as the @value@ default
+--   * "JustCI.Pipeline"'s @runGraph@ \/ @runDumpYaml@ as the literal
+--     embedded in inspection output
+--
+-- Sharing the constant avoids the three-literal drift risk that
+-- prompted extracting it. See juspay\/justci#39.
+defaultCacheTtlHours :: Int
+defaultCacheTtlHours = 48
 
 -- | The remote cache prefix — the directory holding every
 -- @\<short-sha\>\/\<platform\>\/@ dir. Single source of truth for the
