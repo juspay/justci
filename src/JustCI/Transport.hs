@@ -197,7 +197,7 @@ remoteEvictCacheShell ttlHours sha =
     "; "
     [ "ROOT=" <> cacheRoot,
       "CURRENT=\"$ROOT/" <> shortSha sha <> "\"",
-      "HOURS=" <> T.pack (show ttlHours),
+      "HOURS=" <> display ttlHours,
       "if [ \"$HOURS\" -gt 0 ] && [ -d \"$ROOT\" ]; then "
         <> "find \"$ROOT\" -mindepth 1 -maxdepth 1 -type d "
         <> "-mmin +$((HOURS * 60)) "
