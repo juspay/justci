@@ -62,12 +62,17 @@ import JustCI.Platform (Platform)
 -- ('remoteEvictCacheShell') so the remote prunes stale per-SHA cache
 -- dirs on every setup. Composed into the same SSH call to avoid a
 -- second round-trip; @ttlHours == 0@ makes the eviction a no-op.
+--
+-- @set -e@ is emitted exactly once at the head of the composed shell
+-- text. The two snippet helpers are pure statement sequences — owning
+-- the strict-mode flag is the combiner's job. A future change like
+-- adding @set -o pipefail@ for the eviction pipeline edits one site.
 sshSetupCommand :: Host -> Sha -> Platform -> Int -> Text
 sshSetupCommand host sha targetPlat ttlHours =
   shipJustDrv r targetPlat
     <> " && git bundle create - --all 2>/dev/null | "
     <> r
-    <> " '"
+    <> " 'set -e ; "
     <> remoteEvictCacheShell ttlHours sha
     <> " ; "
     <> remoteSetupShell sha targetPlat
@@ -148,11 +153,14 @@ cachedRunDir sha targetPlat =
 -- and friends alone; the remote shell expands them. Cache-hit path
 -- short-circuits with @cat > /dev/null@ to consume the bundle bytes
 -- the local side is already piping.
+--
+-- Pure statement sequence — the @set -e@ that this used to emit is
+-- now owned by 'sshSetupCommand' so the composed script has one
+-- strict-mode declaration, not one per fragment.
 remoteSetupShell :: Sha -> Platform -> Text
 remoteSetupShell sha targetPlat =
   T.intercalate "; " $
-    [ "set -e",
-      "DIR=" <> cachedRunDir sha targetPlat
+    [ "DIR=" <> cachedRunDir sha targetPlat
     ]
       <> [ "if [ -d \"$DIR/src\" ]; then cat > /dev/null; exit 0; fi",
            "mkdir -p \"$DIR\"",
@@ -184,12 +192,15 @@ remoteSetupShell sha targetPlat =
 -- Portability: @-mmin@, @-mindepth@, @-maxdepth@, @-path@, @!@, and
 -- @-exec ... {} +@ are all in POSIX/BSD find (verified against
 -- FreeBSD's find(1)); macOS remotes are covered.
+--
+-- Pure statement sequence — the @set -e@ that this used to emit is
+-- now owned by 'sshSetupCommand' so the composed script has one
+-- strict-mode declaration, not one per fragment.
 remoteEvictCacheShell :: Int -> Sha -> Text
 remoteEvictCacheShell ttlHours sha =
   T.intercalate
     "; "
-    [ "set -e",
-      "ROOT=" <> cacheRoot,
+    [ "ROOT=" <> cacheRoot,
       "CURRENT=\"$ROOT/" <> T.take shortShaLen (display sha) <> "\"",
       "HOURS=" <> T.pack (show ttlHours),
       "if [ \"$HOURS\" -gt 0 ] && [ -d \"$ROOT\" ]; then "
