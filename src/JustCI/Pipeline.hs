@@ -26,13 +26,16 @@ module JustCI.Pipeline
 
     -- * Pipeline assembly
     RunMode (..),
-    RunPolicy (..),
-    SnapshotPolicy (..),
-    PolicyShape (..),
-    policyShape,
     BuildGraphError,
     buildNodeGraph,
     buildProcessCompose,
+
+    -- * === Internal (exposed for tests) ===
+    -- | 'PolicyShape' and 'policyShape' are exported so
+    -- "JustCI.PipelineSpec" can unit-test the flag-folding rules
+    -- without faking @gh@\/@git@ subprocesses.
+    PolicyShape (..),
+    policyShape,
   )
 where
 
