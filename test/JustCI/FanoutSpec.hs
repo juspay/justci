@@ -42,8 +42,11 @@ spec = describe "pipelinePlatformsFor" $ do
 
   describe "user --platform filter" $ do
     it "[] is identity (matches the natural fanout exactly)" $
+      -- Pin to the concrete expected list rather than re-invoking the
+      -- function on both sides — a tautology that would survive any
+      -- regression in pipelinePlatformsFor itself.
       pipelinePlatformsFor [] crossRoot X86_64Linux darwinHost
-        `shouldBe` pipelinePlatformsFor [] crossRoot X86_64Linux darwinHost
+        `shouldBe` Right [X86_64Linux, Aarch64Darwin]
 
     it "singleton picks one lane out of a multi-lane fanout" $
       pipelinePlatformsFor [X86_64Linux] crossRoot X86_64Linux darwinHost `shouldBe` Right [X86_64Linux]
