@@ -89,6 +89,8 @@ Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@hos
 
 **`--host PLATFORM=ADDR` overlays onto `hosts.json` for one invocation.** Repeatable; CLI entries win on collision. `justci run --host x86_64-linux=root@lxc-foo` redirects the linux lane to a throwaway LXC container without touching the JSON file. Platforms not named on the CLI still consult `hosts.json` as usual.
 
+**`--platform PLATFORM` restricts the fanout itself.** Repeatable; the pipeline universe becomes `(root OS families ∩ configured systems) ∩ --platform set`. `justci run --platform x86_64-linux` runs the linux lane only, regardless of how many other platforms the root recipe declares. Distinct from the positional `RECIPE@PLATFORM` selector: that pins one named recipe to one platform via post-fanout reachability; `--platform` slices the platform universe pre-fanout, so it composes orthogonally with positional selectors that don't name a platform (e.g. `justci run e2e --platform x86_64-linux` runs `e2e` + its deps on linux only). Works in `CI=true` strict mode too — handy for testing strict-mode behavior on one lane without the full remote fanout.
+
 ## Subcommands
 
 | Command | Purpose |
@@ -101,10 +103,11 @@ Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@hos
 ### `justci run`
 
 ```
-justci run [--tui] [--host PLATFORM=ADDR ...] [--root RECIPE] [--no-deps] [--cache-ttl-hours N] [RECIPE[@PLATFORM]...] [-- <args>]
+justci run [--tui] [--host PLATFORM=ADDR ...] [--platform PLATFORM ...] [--root RECIPE] [--no-deps] [--cache-ttl-hours N] [RECIPE[@PLATFORM]...] [-- <args>]
 ```
 
 - `--tui` — swap process-compose's headless logger for its interactive tcell view; useful for poking at long-running pipelines locally
+- `--platform PLATFORM` — restrict the run to this platform; repeatable to opt into a subset (e.g. `--platform x86_64-linux --platform aarch64-darwin` runs two of three lanes). Intersected with the natural fanout: requested platforms outside it are silently dropped, an empty intersection errors with a message naming `--platform` as the cause. Works in `CI=true` strict mode too — useful for testing strict-mode behavior on one lane without spinning up every remote. See [_Platform fanout_](#platform-fanout).
 - `--root RECIPE` — replace the DAG root that `[metadata("ci")]` would have picked
 - `--no-deps` — the `just`-style escape hatch: keep only the named selectors, skip their dependency closure (setup nodes still auto-included on remote platforms so the YAML doesn't reference dropped dependencies)
 - `--cache-ttl-hours N` — prune per-SHA cache dirs older than `N` hours on every remote setup (default 48). `0` disables eviction; the current run's dir is never evicted. See [_Remote builds over SSH_](#remote-builds-over-ssh).

@@ -118,6 +118,14 @@ data ProtectOpts = ProtectOpts
 --   * @tui@: drive process-compose's TUI instead of its headless logger.
 --   * @hostOverrides@: overlay onto @~\/.config\/justci\/hosts.json@ via
 --     'JustCI.Hosts.mergeHostOverrides'; CLI entries win on collision.
+--   * @platformFilter@: restrict the pipeline's platform universe to
+--     these platforms; intersected with the natural fanout in
+--     'JustCI.Fanout.pipelinePlatformsFor'. Empty list means no
+--     restriction (the natural fanout is used). Distinct from
+--     positional @RECIPE\@PLATFORM@ selectors: those filter
+--     post-fanout via reachability; this filter operates pre-fanout
+--     on the platform universe itself, so it composes with selectors
+--     that don't name a platform.
 --   * @dagSelection@: the DAG-shape choice — @--root@ override plus the
 --     positional leaf selectors and @--no-deps@ flag, bundled into one
 --     value so 'JustCI.Pipeline.buildProcessCompose' takes a single
@@ -131,6 +139,7 @@ data ProtectOpts = ProtectOpts
 data RunOpts = RunOpts
   { tui :: Bool,
     hostOverrides :: [(Platform, Host)],
+    platformFilter :: [Platform],
     dagSelection :: DagSelection,
     -- | TTL in hours for per-SHA dirs under the remote cache root.
     -- @0@ disables eviction; the current run's dir is never evicted.
@@ -222,6 +231,14 @@ runOptsParser =
               <> help "Override the ~/.config/justci/hosts.json mapping for this run. Repeatable; e.g. --host x86_64-linux=root@lxc-foo. CLI overrides win over the file; platforms not named here still consult the file."
           )
       )
+    <*> many
+      ( option
+          platformReader
+          ( long "platform"
+              <> metavar "PLATFORM"
+              <> help "Restrict the run to this platform; repeatable to opt into a subset (e.g. --platform x86_64-linux --platform aarch64-darwin). Without --platform, the pipeline fans out across every platform the root recipe's OS attributes permit. Intersected with the natural fanout — requested platforms outside it are silently dropped; an empty intersection errors. No effect on `dump-yaml`/`graph`/`protect`."
+          )
+      )
     <*> dagSelectionParser
     <*> option
       auto
@@ -283,6 +300,18 @@ recipeNameReader = eitherReader $ \s ->
   if null s
     then Left "empty recipe name in --root"
     else Right (recipeNameFromText (T.pack s))
+
+-- | Parse a single @PLATFORM@ argument into a typed 'Platform'.
+-- The accepted vocabulary is the same as 'hostOverrideReader' — one
+-- of the 'JustCI.Platform.Platform' display renderings. Used by
+-- @--platform@ for the pre-fanout user filter; on parse failure the
+-- error names the supported set verbatim.
+platformReader :: ReadM Platform
+platformReader = eitherReader $ \s -> case parsePlatform (T.pack s) of
+  Just p -> Right p
+  Nothing ->
+    Left $
+      "unknown platform " <> s <> " in --platform (expected one of: " <> T.unpack supportedPlatformsLabel <> ")"
 
 -- | Parse a single @PLATFORM=ADDR@ argument into a typed pair. The
 -- platform must be one of the 'Platform' constructors'

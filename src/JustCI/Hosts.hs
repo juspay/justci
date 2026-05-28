@@ -25,6 +25,7 @@ module JustCI.Hosts
 
     -- * Construction
     hostFromText,
+    hostsFromList,
     mergeHostOverrides,
 
     -- * Loading + lookup
@@ -61,6 +62,14 @@ newtype Host = Host Text
 -- override flag).
 hostFromText :: Text -> Host
 hostFromText = Host
+
+-- | Construct a 'Hosts' from a flat list. Last entry wins on
+-- duplicate keys ('Map.fromList' semantics). The non-IO companion to
+-- 'loadHosts'; used by tests and by callers that already have an
+-- in-memory mapping (e.g. one assembled from CLI args before the
+-- file is loaded) so they don't need to round-trip through JSON.
+hostsFromList :: [(Platform, Host)] -> Hosts
+hostsFromList = Hosts . Map.fromList
 
 -- | Overlay caller-supplied @(Platform, Host)@ overrides onto a 'Hosts'
 -- map. Used by the CLI's @--host@ flag for one-shot redirects to a

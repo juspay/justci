@@ -52,8 +52,9 @@ import JustCI.Node (DepsMode (..), NodeId (..), NodeSelector (..), SelectorMode 
 import JustCI.Platform (Platform, platformOs)
 
 -- | The pipeline's platform set: the intersection of (the root
--- recipe's declared OS families) with (the systems we have either a
--- hosts.json entry for OR are running on locally).
+-- recipe's declared OS families) ∩ (the systems we have either a
+-- hosts.json entry for OR are running on locally) ∩ (the user's
+-- @--platform@ subset, when non-empty).
 --
 --   * Root @[linux] [macos]@ + local @x86_64-linux@ + hosts.json
 --     @{aarch64-darwin: ...}@ → @{x86_64-linux, aarch64-darwin}@.
@@ -61,18 +62,29 @@ import JustCI.Platform (Platform, platformOs)
 --     @{x86_64-linux}@ (local-only, no macos).
 --   * Root with no OS attrs → @{localPlat}@ (single-host shape,
 --     same as before fanout existed).
+--   * Same fanout + @--platform x86_64-linux@ → @{x86_64-linux}@
+--     (user-driven subset; partial drop is silent, full empty
+--     surfaces as 'JustCI.Pipeline.EmptyFanout' with the override
+--     named in the message).
 --
 -- A system in @hosts.json@ whose OS family doesn't appear in the root
 -- attributes is silently ignored — the user opts in by adding the OS
 -- attribute to the root. Symmetrically, an OS family in the root that
 -- matches no configured system is silently empty for that family —
--- the user opts in by adding an entry to @hosts.json@.
-pipelinePlatformsFor :: Recipe -> Platform -> Hosts -> [Platform]
-pipelinePlatformsFor root localPlat hosts =
+-- the user opts in by adding an entry to @hosts.json@. The user's
+-- @--platform@ list follows the same silent-drop rule: requested
+-- platforms outside the natural fanout don't error here; the run
+-- proceeds with whatever subset of the request survives the
+-- intersection (or fails through 'EmptyFanout' if nothing does).
+pipelinePlatformsFor :: [Platform] -> Recipe -> Platform -> Hosts -> [Platform]
+pipelinePlatformsFor userFilter root localPlat hosts =
   let configured = nub (localPlat : hostsPlatforms hosts)
-   in case rootOsFamilies root of
+      natural = case rootOsFamilies root of
         [] -> [localPlat]
         oss -> filter (\p -> platformOs p `elem` oss) configured
+   in case userFilter of
+        [] -> natural
+        xs -> filter (`elem` xs) natural
 
 -- | The OS-family attributes declared on a recipe ('[linux]',
 -- '[macos]', etc.), as a plain list. Used both by
