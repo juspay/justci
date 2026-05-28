@@ -30,7 +30,6 @@ module JustCI.Pipeline
     SnapshotPolicy (..),
     PolicyShape (..),
     policyShape,
-    resolveRunPolicy,
     BuildGraphError,
     buildNodeGraph,
     buildProcessCompose,
