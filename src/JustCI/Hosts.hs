@@ -148,7 +148,7 @@ lookupHost :: Platform -> Hosts -> Maybe Host
 lookupHost p (Hosts m) = Map.lookup p m
 
 -- | Every 'Platform' with a configured host entry. The pipeline
--- fanout in 'JustCI.Pipeline' intersects this set with the root recipe's
+-- fanout in 'JustCI.Fanout' intersects this set with the root recipe's
 -- declared OS families to decide which Nix systems to target — so a
 -- platform without a hosts.json entry doesn't appear in the fanout
 -- at all (no prompt-on-miss, no fail-fast: the user explicitly opts
