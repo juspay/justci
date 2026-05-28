@@ -31,6 +31,7 @@ module JustCI.Pipeline
     buildProcessCompose,
 
     -- * === Internal (exposed for tests) ===
+
     -- | 'PolicyShape' and 'policyShape' are exported so
     -- "JustCI.PipelineSpec" can unit-test the flag-folding rules
     -- without faking @gh@\/@git@ subprocesses.
@@ -358,8 +359,10 @@ buildOnState policy recipes outcomes = case policy of
     pure $ \ps -> withParsedNode ps $ \node ->
       postStatusFor timings s.snapRepo s.snapSha s.snapLogDir recipes node ps
         >> recordOutcome outcomes node ps
-  _ ->
-    pure $ \ps -> withParsedNode ps $ \node -> recordOutcome outcomes node ps
+  NoSnapshot -> pure recordOnly
+  SnapshotOnly _ -> pure recordOnly
+  where
+    recordOnly ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
 
 -- | Print the assembled pipeline's dependency graph to stdout in
 -- Mermaid @flowchart@ syntax. Uses the same 'DumpRun' shape
