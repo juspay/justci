@@ -48,7 +48,7 @@ import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
 import JustCI.CommitStatus (contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
-import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
+import JustCI.Fanout (EmptyFanoutCause (..), applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
@@ -448,25 +448,28 @@ data BuildGraphError
     --     back to the user.
     BadRoot RecipeName
   | -- | The platform fanout for this root collapsed to the empty
-    --     set. Carries the root name, the root's declared OS families,
-    --     and the user's @--platform@ list (empty when the flag wasn't
-    --     supplied). The 'Display' instance branches on that list so
-    --     the message blames @hosts.json@ when the natural fanout was
-    --     already empty and blames @--platform@ when the override is
-    --     what nuked an otherwise-non-empty fanout.
-    EmptyFanout RecipeName [J.Os] [Platform]
+    --     set. Carries the root name, the root's declared OS
+    --     families, the structural reason from 'pipelinePlatformsFor'
+    --     ('EmptyNaturalFanout' vs 'FilterExcludedAll'), and the
+    --     user's @--platform@ list — the last just to echo the
+    --     offending tokens back in the 'FilterExcludedAll' message.
+    --     The 'Display' instance pattern-matches on the cause, not on
+    --     the shape of the filter list, so the attribution can't drift
+    --     when both the natural fanout and the filter happen to be
+    --     empty.
+    EmptyFanout RecipeName [J.Os] EmptyFanoutCause [Platform]
   deriving stock (Show)
 
 instance Display BuildGraphError where
   displayBuilder (BadRoot r) =
     "--root " <> displayBuilder r <> " is not a recipe in the justfile"
-  displayBuilder (EmptyFanout rootName oss []) =
+  displayBuilder (EmptyFanout rootName oss EmptyNaturalFanout _) =
     "root recipe declares OS attrs but no matching system is configured. "
       <> "Either remove the OS attrs from "
       <> displayBuilder rootName
       <> " or add an entry to ~/.config/justci/hosts.json for one of: "
       <> displayBuilder (T.pack (unwords (show <$> oss)))
-  displayBuilder (EmptyFanout rootName oss filt) =
+  displayBuilder (EmptyFanout rootName oss FilterExcludedAll filt) =
     "--platform "
       <> displayBuilder (T.intercalate ", " (display <$> filt))
       <> " excluded every platform matching "
@@ -526,10 +529,9 @@ buildNodeGraph hosts sel = do
       reachable <- dieOnLeft $ reachableSubgraph rootName recipes
       recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
       localPlat <- dieOnLeft localPlatform
-      let pipelinePlatforms = pipelinePlatformsFor sel.platformFilter rootRecipe localPlat hosts
-      case pipelinePlatforms of
-        [] -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe) sel.platformFilter))
-        _ -> do
+      case pipelinePlatformsFor sel.platformFilter rootRecipe localPlat hosts of
+        Left cause -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe) cause sel.platformFilter))
+        Right pipelinePlatforms -> do
           let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
           nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
           pure (Right (nodeGraph, localPlat, recipes))

@@ -26,6 +26,7 @@
 module JustCI.Fanout
   ( -- * Platform-set derivation
     pipelinePlatformsFor,
+    EmptyFanoutCause (..),
     rootOsFamilies,
 
     -- * Recipe → node-id fanout
@@ -76,15 +77,37 @@ import JustCI.Platform (Platform, platformOs)
 -- platforms outside the natural fanout don't error here; the run
 -- proceeds with whatever subset of the request survives the
 -- intersection (or fails through 'EmptyFanout' if nothing does).
-pipelinePlatformsFor :: [Platform] -> Recipe -> Platform -> Hosts -> [Platform]
+pipelinePlatformsFor :: [Platform] -> Recipe -> Platform -> Hosts -> Either EmptyFanoutCause [Platform]
 pipelinePlatformsFor userFilter root localPlat hosts =
   let configured = nub (localPlat : hostsPlatforms hosts)
       natural = case rootOsFamilies root of
         [] -> [localPlat]
         oss -> filter (\p -> platformOs p `elem` oss) configured
-   in case userFilter of
+      filtered = case userFilter of
         [] -> natural
         xs -> filter (`elem` xs) natural
+   in case (natural, filtered) of
+        ([], _) -> Left EmptyNaturalFanout
+        (_, []) -> Left FilterExcludedAll
+        _ -> Right filtered
+
+-- | Why a fanout collapsed to the empty set. Computed by
+-- 'pipelinePlatformsFor' at the same site that owns the intersection,
+-- so the orchestrator in "JustCI.Pipeline" never re-derives the
+-- natural fanout to attribute blame. Consumers ('BuildGraphError''s
+-- 'Display' instance) pattern-match on the cause to pick a user-facing
+-- message — the structurally correct one, not a heuristic based on
+-- whether the user-filter list happens to be empty.
+data EmptyFanoutCause
+  = -- | The natural fanout (root OS families ∩ configured systems)
+    --     was empty before the user filter applied. Blame
+    --     @hosts.json@: no system covers the root's OS attrs.
+    EmptyNaturalFanout
+  | -- | The natural fanout was non-empty, but the user's
+    --     @--platform@ filter excluded every platform in it. Blame
+    --     the override.
+    FilterExcludedAll
+  deriving stock (Show, Eq)
 
 -- | The OS-family attributes declared on a recipe ('[linux]',
 -- '[macos]', etc.), as a plain list. Used both by
