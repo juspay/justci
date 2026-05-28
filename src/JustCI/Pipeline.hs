@@ -200,46 +200,49 @@ data SnapshotPolicy = SnapshotPolicy
   }
 
 -- | Pure projection of the strict-vs-dev flag triple
--- (@--no-strict@, @--no-snapshot@, @--no-post@) onto the two
--- decisions the IO resolver acts on:
+-- (@--no-strict@, @--no-snapshot@, @--no-post@) onto the three
+-- valid resolved-policy states. A sum with one constructor per
+-- valid state — rather than a 'Bool'-pair record — so the
+-- "@post@ without snapshot" combination is unrepresentable at
+-- the type level rather than enforced at the value layer.
 --
---   * 'wantSnapshot' — whether to incur the pre-flight IO
---     (clean-tree refuse + @gh repo view@ + @git rev-parse HEAD@)
---     and apply the @git worktree@ pin.
---   * 'wantPost' — whether to fan @onState@ into 'postStatusFor'.
+--   * 'DevMode' — live working tree, no GH posts. The opt-out
+--     arm: @--no-strict@ (the shortcut) or @--no-snapshot@.
+--   * 'StrictNoPost' — snapshot engaged (clean-tree refuse + HEAD
+--     pin) but GH posts skipped. The @--no-post@ arm.
+--   * 'FullStrict' — snapshot engaged + GH posts. The default of
+--     @nix run . -- run@ (no opt-out flags).
 --
--- Flag interactions are folded here rather than at the CLI layer
--- (no parser-level rejection of incoherent combinations — every
--- combination resolves to a valid 'PolicyShape'):
+-- Flag interactions fold into the resolution at one site
+-- ('policyShape') rather than at the CLI parser layer — every
+-- 'RunOpts' value lands on exactly one constructor:
 --
 --   * @--no-strict@ is the dev-mode shortcut: equivalent to passing
 --     both @--no-snapshot@ and @--no-post@.
---   * @--no-snapshot@ implies @wantPost = False@ — a SHA-tagged
---     status posted against bytes that aren't @HEAD@ violates the
---     "SHA matches tested bytes" invariant, so the resolver
---     suppresses posts whenever the snapshot is skipped.
---   * @--no-post@ alone leaves snapshot engaged but skips GH writes:
---     for non-github strict consumers and for debugging strict runs
---     without writing to the PR's checks list.
+--   * @--no-snapshot@ subsumes @--no-post@ — a SHA-tagged status
+--     posted against bytes that aren't @HEAD@ violates the
+--     "SHA matches tested bytes" invariant, so any @--no-snapshot@
+--     run lands on 'DevMode' regardless of @--no-post@'s value.
+--   * @--no-post@ alone keeps snapshot engaged: for non-github
+--     strict consumers and for debugging strict runs without
+--     writing to the PR's checks list.
 --
 -- Separated from 'resolveRunPolicy' so the boolean-folding rules
 -- are unit-testable without faking @gh@\/@git@ subprocesses.
-data PolicyShape = PolicyShape
-  { wantSnapshot :: Bool,
-    wantPost :: Bool
-  }
+data PolicyShape
+  = DevMode
+  | StrictNoPost
+  | FullStrict
   deriving stock (Eq, Show)
 
 -- | Reduce the user's three opt-out flags to a 'PolicyShape'. See
--- the 'PolicyShape' haddock for the resolution rules; the
--- invariant @not wantSnapshot ==> not wantPost@ is established
--- here.
+-- the 'PolicyShape' haddock for the resolution rules and the
+-- mapping from constructor → strict-mode side effects.
 policyShape :: RunOpts -> PolicyShape
 policyShape opts
-  | opts.noStrict || opts.noSnapshot =
-      PolicyShape {wantSnapshot = False, wantPost = False}
-  | otherwise =
-      PolicyShape {wantSnapshot = True, wantPost = not opts.noPost}
+  | opts.noStrict || opts.noSnapshot = DevMode
+  | opts.noPost = StrictNoPost
+  | otherwise = FullStrict
 
 -- | Resolve the user's flags into a 'RunPolicy', performing every
 -- fail-fast check before returning.
@@ -257,19 +260,21 @@ policyShape opts
 -- shape's verdict, fetch the artefacts the snapshot arm needs.
 resolveRunPolicy :: RunOpts -> RunDir -> IO RunPolicy
 resolveRunPolicy opts dirs = case policyShape opts of
-  PolicyShape {wantSnapshot = False} -> pure NoSnapshot
-  PolicyShape {wantSnapshot = True, wantPost = wantP} -> do
-    dieOnLeft =<< ensureCleanTree
-    repo <- dieOnLeft =<< viewRepo
-    sha <- dieOnLeft =<< resolveSha
-    let snap =
-          SnapshotPolicy
-            { snapRepo = repo,
-              snapSha = sha,
-              snapWorktreeDir = dirs.worktreePath,
-              snapLogDir = logDirFor sha
-            }
-    pure $ if wantP then SnapshotAndPost snap else SnapshotOnly snap
+  DevMode -> pure NoSnapshot
+  StrictNoPost -> snapshotted SnapshotOnly
+  FullStrict -> snapshotted SnapshotAndPost
+  where
+    snapshotted ctor = do
+      dieOnLeft =<< ensureCleanTree
+      repo <- dieOnLeft =<< viewRepo
+      sha <- dieOnLeft =<< resolveSha
+      pure . ctor $
+        SnapshotPolicy
+          { snapRepo = repo,
+            snapSha = sha,
+            snapWorktreeDir = dirs.worktreePath,
+            snapLogDir = logDirFor sha
+          }
 
 -- | The single entry point for @justci run@. Resolves the user's
 -- opt-out flags into a 'RunPolicy' via 'resolveRunPolicy' (which

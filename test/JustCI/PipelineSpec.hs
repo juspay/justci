@@ -1,15 +1,13 @@
-{-# LANGUAGE OverloadedRecordDot #-}
-
 -- | Tests for "JustCI.Pipeline"'s 'policyShape' — the pure flag-folding
--- step that decides, given the user's three opt-out flags, whether
--- the pre-flight (clean-tree + repo + SHA) needs to run and whether
--- the @onState@ callback should fan into 'postStatusFor'. Owns the
--- contract the strict-by-default flip introduced (default mode is
--- @snapshot + post@; @--no-strict@ collapses both; @--no-snapshot@
--- implies @--no-post@; @--no-post@ alone keeps snapshot).
+-- step that decides, given the user's three opt-out flags, which of
+-- the three valid 'PolicyShape' constructors the run lands on
+-- ('DevMode', 'StrictNoPost', 'FullStrict'). Owns the contract the
+-- strict-by-default flip introduced (default → 'FullStrict';
+-- @--no-strict@ \/ @--no-snapshot@ → 'DevMode'; @--no-post@ alone
+-- → 'StrictNoPost').
 --
 -- 'resolveRunPolicy' itself stays untested at this layer — its only
--- behaviour past the shape verdict is calling @gh@/@git@ subprocesses,
+-- behaviour past the shape verdict is calling @gh@\/@git@ subprocesses,
 -- which 'policyShape' factors out so the boolean rules can be
 -- exercised without any IO faking.
 module JustCI.PipelineSpec (spec) where
@@ -39,37 +37,29 @@ mkOpts ns nss np =
 
 spec :: Spec
 spec = describe "policyShape" $ do
-  it "default (no flags) is full strict: snapshot + post" $
-    policyShape (mkOpts False False False)
-      `shouldBe` PolicyShape {wantSnapshot = True, wantPost = True}
+  it "default (no flags) is FullStrict — snapshot + GH posts" $
+    policyShape (mkOpts False False False) `shouldBe` FullStrict
 
-  it "--no-post alone keeps snapshot but suppresses posts" $
-    policyShape (mkOpts False False True)
-      `shouldBe` PolicyShape {wantSnapshot = True, wantPost = False}
+  it "--no-post alone is StrictNoPost — snapshot, no GH posts" $
+    policyShape (mkOpts False False True) `shouldBe` StrictNoPost
 
-  it "--no-snapshot drops snapshot AND posts (post without snapshot violates the SHA-matches-tested-bytes invariant)" $
-    policyShape (mkOpts False True False)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
+  it "--no-snapshot is DevMode (subsumes --no-post — post without snapshot violates the SHA-matches-tested-bytes invariant)" $
+    policyShape (mkOpts False True False) `shouldBe` DevMode
 
   it "--no-snapshot + --no-post is the same as --no-snapshot alone (--no-post is redundant)" $
-    policyShape (mkOpts False True True)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
+    policyShape (mkOpts False True True) `shouldBe` DevMode
 
-  it "--no-strict is the dev-mode meta: equivalent to --no-snapshot + --no-post" $
-    policyShape (mkOpts True False False)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
+  it "--no-strict is the dev-mode meta — equivalent to --no-snapshot + --no-post" $
+    policyShape (mkOpts True False False) `shouldBe` DevMode
 
   it "--no-strict subsumes the other two flags regardless of their values" $ do
-    policyShape (mkOpts True True False)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
-    policyShape (mkOpts True False True)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
-    policyShape (mkOpts True True True)
-      `shouldBe` PolicyShape {wantSnapshot = False, wantPost = False}
+    policyShape (mkOpts True True False) `shouldBe` DevMode
+    policyShape (mkOpts True False True) `shouldBe` DevMode
+    policyShape (mkOpts True True True) `shouldBe` DevMode
 
-  it "preserves the invariant: wantSnapshot=False implies wantPost=False (every case)" $ do
+  it "only ever resolves to one of the three valid constructors (no incoherent fourth state, by construction)" $ do
     let allFlagCombos = [(ns, nss, np) | ns <- [False, True], nss <- [False, True], np <- [False, True]]
-        invariantHolds (ns, nss, np) =
-          let s = policyShape (mkOpts ns nss np)
-           in s.wantSnapshot || not s.wantPost
-    mapM_ (`shouldSatisfy` invariantHolds) allFlagCombos
+        landsOnValidConstructor flags =
+          policyShape (uncurry3 mkOpts flags) `elem` [DevMode, StrictNoPost, FullStrict]
+        uncurry3 f (a, b, c) = f a b c
+    mapM_ (`shouldSatisfy` landsOnValidConstructor) allFlagCombos
