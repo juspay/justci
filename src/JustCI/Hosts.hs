@@ -14,7 +14,7 @@
 -- Read-only from the runner's perspective: the user edits the JSON
 -- file by hand. 'loadHosts' reads the file (dropping unknown keys),
 -- 'lookupHost' / 'hostsPlatforms' query the result. Missing entries
--- are not an error — 'JustCI.Pipeline.pipelinePlatformsFor' silently
+-- are not an error — 'JustCI.Fanout.pipelinePlatformsFor' silently
 -- excludes platforms with no entry from the fanout, so the user
 -- opts in to a remote lane by adding its hosts.json key.
 module JustCI.Hosts
@@ -77,7 +77,7 @@ hostsFromList = Hosts . Map.fromList
 -- @~\/.config\/justci\/hosts.json@. CLI overrides win over the loaded map
 -- on collision; platforms not named by either source still route
 -- inline when they match 'JustCI.Platform.localPlatform', and get
--- filtered out of the fanout by 'JustCI.Pipeline.pipelinePlatformsFor'
+-- filtered out of the fanout by 'JustCI.Fanout.pipelinePlatformsFor'
 -- otherwise.
 mergeHostOverrides :: [(Platform, Host)] -> Hosts -> Hosts
 mergeHostOverrides overrides (Hosts m) =
