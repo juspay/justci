@@ -172,7 +172,7 @@ withCiLock lockPath sockFile action =
 runLocal :: RunOpts -> [String] -> RunDir -> IO ()
 runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection opts.platformFilter LocalRun opts.cacheTtlHours
+  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun opts.cacheTtlHours
   outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
   let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
   withObserver dirs.sock onState $
@@ -214,7 +214,7 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
   hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
   let logDir = logDirFor sha
   withSnapshotWorktree dirs.worktreePath $ do
-    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection opts.platformFilter (StrictRun dirs.worktreePath logDir) opts.cacheTtlHours
+    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir) opts.cacheTtlHours
     let nodes = processNames pc
     createPlatformDirs logDir nodes
     outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
@@ -248,10 +248,11 @@ runGraph = do
   -- DumpRun emits structure-only output; the TTL is a body field on
   -- the rendered SSH command, irrelevant to graph topology. Pass the
   -- shared default so the embedded number matches what the real run
-  -- would use by default (operators override per-invocation). Empty
-  -- @platformFilter@: inspection commands always render the full
-  -- canonical fanout regardless of the @--platform@ knob on @run@.
-  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection [] DumpRun defaultCacheTtlHours
+  -- would use by default (operators override per-invocation).
+  -- 'defaultDagSelection' carries an empty 'platformFilter', so the
+  -- rendered graph reflects the full canonical fanout regardless of
+  -- the @--platform@ knob on @run@.
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   TIO.putStrLn (toMermaid (processGraph pc))
 
 -- | Emit the assembled process-compose YAML to stdout. Uses 'DumpRun'
@@ -263,10 +264,10 @@ runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
   -- See 'runGraph' for why the defaults are fine here: the dumped
   -- YAML embeds the TTL number for inspection; the actual run uses
-  -- whatever @--cache-ttl-hours@ resolves to; an empty
-  -- @platformFilter@ means the YAML always reflects the canonical
+  -- whatever @--cache-ttl-hours@ resolves to. 'defaultDagSelection'
+  -- pins @platformFilter = []@ so the YAML reflects the canonical
   -- fanout regardless of the @--platform@ knob on @run@.
-  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection [] DumpRun defaultCacheTtlHours
+  (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   BS.putStr (Y.encode pc)
 
 -- | Branch-protection helper: read the canonical DAG, extract the
@@ -303,7 +304,7 @@ runDumpYaml = do
 runProtect :: ProtectOpts -> IO ()
 runProtect opts = do
   hosts <- dieOnLeft =<< loadHosts
-  (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection []
+  (nodeGraph, _, recipes) <- dieOnLeft =<< buildNodeGraph hosts defaultDagSelection
   let contexts = contextForNode <$> filter (isRequiredCheck recipes) (G.vertexList nodeGraph)
   case contexts of
     [] -> die "no recipe nodes in the DAG — nothing to require"
@@ -507,8 +508,8 @@ instance Display BuildGraphError where
 -- Both are computed here anyway as part of fanout — exposing them
 -- avoids shelling out to @just --dump@ a second time and avoids the
 -- dormant divergence risk of two parses going out of sync mid-run.
-buildNodeGraph :: Hosts -> DagSelection -> [Platform] -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform, Map.Map RecipeName Recipe))
-buildNodeGraph hosts sel platformFilter = do
+buildNodeGraph :: Hosts -> DagSelection -> IO (Either BuildGraphError (G.AdjacencyMap NodeId, Platform, Map.Map RecipeName Recipe))
+buildNodeGraph hosts sel = do
   recipes <- dieOnLeft =<< fetchDump
   rootResult <- case sel.rootOverride of
     Just r
@@ -525,9 +526,9 @@ buildNodeGraph hosts sel platformFilter = do
       reachable <- dieOnLeft $ reachableSubgraph rootName recipes
       recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
       localPlat <- dieOnLeft localPlatform
-      let pipelinePlatforms = pipelinePlatformsFor platformFilter rootRecipe localPlat hosts
+      let pipelinePlatforms = pipelinePlatformsFor sel.platformFilter rootRecipe localPlat hosts
       case pipelinePlatforms of
-        [] -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe) platformFilter))
+        [] -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe) sel.platformFilter))
         _ -> do
           let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
           nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
@@ -544,9 +545,9 @@ buildNodeGraph hosts sel platformFilter = do
 -- depending on whether its platform matches the runner's; the
 -- 'JustCI.Transport' builders are the only site that know SSH command
 -- shapes.
-buildProcessCompose :: Hosts -> DagSelection -> [Platform] -> RunMode -> Int -> IO (Either BuildGraphError (ProcessCompose, Map.Map RecipeName Recipe))
-buildProcessCompose hosts sel platformFilter mode cacheTtlHours = do
-  result <- buildNodeGraph hosts sel platformFilter
+buildProcessCompose :: Hosts -> DagSelection -> RunMode -> Int -> IO (Either BuildGraphError (ProcessCompose, Map.Map RecipeName Recipe))
+buildProcessCompose hosts sel mode cacheTtlHours = do
+  result <- buildNodeGraph hosts sel
   case result of
     Left err -> pure (Left err)
     Right (nodeGraph, localPlat, recipes) -> do
