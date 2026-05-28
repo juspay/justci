@@ -14,7 +14,7 @@
 -- Read-only from the runner's perspective: the user edits the JSON
 -- file by hand. 'loadHosts' reads the file (dropping unknown keys),
 -- 'lookupHost' / 'hostsPlatforms' query the result. Missing entries
--- are not an error — 'JustCI.Pipeline.pipelinePlatformsFor' silently
+-- are not an error — 'JustCI.Fanout.pipelinePlatformsFor' silently
 -- excludes platforms with no entry from the fanout, so the user
 -- opts in to a remote lane by adding its hosts.json key.
 module JustCI.Hosts
@@ -31,6 +31,9 @@ module JustCI.Hosts
     loadHosts,
     lookupHost,
     hostsPlatforms,
+
+    -- * Internal (exposed for tests)
+    hostsFromList,
   )
 where
 
@@ -62,13 +65,20 @@ newtype Host = Host Text
 hostFromText :: Text -> Host
 hostFromText = Host
 
+-- | Internal smart constructor — currently the only consumer is
+-- 'JustCI.FanoutSpec', so the test suite can build a 'Hosts' without
+-- exposing the newtype constructor. Last entry wins on duplicate keys
+-- ('Map.fromList' semantics). Production paths use 'loadHosts'.
+hostsFromList :: [(Platform, Host)] -> Hosts
+hostsFromList = Hosts . Map.fromList
+
 -- | Overlay caller-supplied @(Platform, Host)@ overrides onto a 'Hosts'
 -- map. Used by the CLI's @--host@ flag for one-shot redirects to a
 -- throwaway target (e.g. an LXC container) without editing
 -- @~\/.config\/justci\/hosts.json@. CLI overrides win over the loaded map
 -- on collision; platforms not named by either source still route
 -- inline when they match 'JustCI.Platform.localPlatform', and get
--- filtered out of the fanout by 'JustCI.Pipeline.pipelinePlatformsFor'
+-- filtered out of the fanout by 'JustCI.Fanout.pipelinePlatformsFor'
 -- otherwise.
 mergeHostOverrides :: [(Platform, Host)] -> Hosts -> Hosts
 mergeHostOverrides overrides (Hosts m) =
@@ -138,7 +148,7 @@ lookupHost :: Platform -> Hosts -> Maybe Host
 lookupHost p (Hosts m) = Map.lookup p m
 
 -- | Every 'Platform' with a configured host entry. The pipeline
--- fanout in 'JustCI.Pipeline' intersects this set with the root recipe's
+-- fanout in 'JustCI.Fanout' intersects this set with the root recipe's
 -- declared OS families to decide which Nix systems to target — so a
 -- platform without a hosts.json entry doesn't appear in the fanout
 -- at all (no prompt-on-miss, no fail-fast: the user explicitly opts

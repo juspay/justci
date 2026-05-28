@@ -188,17 +188,29 @@ data SelectorMode
   deriving stock (Show, Eq)
 
 -- | The user-supplied "what to run" spec for a single @ci run@
--- invocation. Groups the two orthogonal axes — DAG root override and
--- selector mode — that together decide which fanned-out nodes the
--- pipeline targets. One value travels through 'JustCI.Pipeline'
--- (@buildProcessCompose@, the inspection subcommands' canonical-mode
--- callers) instead of three positional arguments.
+-- invocation. Groups the three orthogonal axes — DAG root override,
+-- platform-universe filter, and selector mode — that together decide
+-- which fanned-out nodes the pipeline targets. One value travels
+-- through 'JustCI.Pipeline' (@buildProcessCompose@, the inspection
+-- subcommands' canonical-mode callers) instead of four positional
+-- arguments. Two of the three axes are consumed pre-'fanOut'
+-- (@rootOverride@, @platformFilter@) and one is consumed post-'fanOut'
+-- (@selectorMode@); the bundling reflects user intent for one
+-- invocation, not pipeline phase.
 --
 -- 'defaultDagSelection' is the constant used by every inspection
 -- caller ('runGraph', 'runDumpYaml', 'runProtect') — the canonical
--- @[metadata("ci")]@-root DAG with no leaf trimming.
+-- @[metadata("ci")]@-root DAG with no leaf trimming and no
+-- platform restriction.
 data DagSelection = DagSelection
   { rootOverride :: Maybe RecipeName,
+    -- | Restrict the pipeline's platform universe to these platforms.
+    -- Empty = no restriction (the natural fanout from
+    -- @rootOsFamilies@ ∩ configured systems is used). Intersected
+    -- with the natural fanout inside 'JustCI.Fanout.pipelinePlatformsFor'.
+    -- @run@-only: inspection subcommands always render the canonical
+    -- full DAG, so they carry the empty default from 'defaultDagSelection'.
+    platformFilter :: [Platform],
     selectorMode :: SelectorMode
   }
   deriving stock (Show, Eq)
@@ -207,7 +219,12 @@ data DagSelection = DagSelection
 -- Used by inspection commands and by callers that haven't been given
 -- per-run options.
 defaultDagSelection :: DagSelection
-defaultDagSelection = DagSelection {rootOverride = Nothing, selectorMode = AllNodes}
+defaultDagSelection =
+  DagSelection
+    { rootOverride = Nothing,
+      platformFilter = [],
+      selectorMode = AllNodes
+    }
 
 -- | Render an adjacency map of 'NodeId's as Mermaid @flowchart TD@.
 -- Vertex IDs are sanitized to mermaid-safe alphanumeric+underscore;

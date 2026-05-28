@@ -48,7 +48,7 @@ import qualified Data.Yaml as Y
 import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
 import JustCI.CommitStatus (contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
-import JustCI.Fanout (applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
+import JustCI.Fanout (EmptyFanoutCause (..), applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
 import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
@@ -249,6 +249,9 @@ runGraph = do
   -- the rendered SSH command, irrelevant to graph topology. Pass the
   -- shared default so the embedded number matches what the real run
   -- would use by default (operators override per-invocation).
+  -- 'defaultDagSelection' carries an empty 'platformFilter', so the
+  -- rendered graph reflects the full canonical fanout regardless of
+  -- the @--platform@ knob on @run@.
   (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   TIO.putStrLn (toMermaid (processGraph pc))
 
@@ -259,9 +262,11 @@ runGraph = do
 runDumpYaml :: IO ()
 runDumpYaml = do
   hosts <- dieOnLeft =<< loadHosts
-  -- See 'runGraph' for why the default is fine here: the dumped YAML
-  -- embeds the TTL number for inspection; the actual run uses
-  -- whatever @--cache-ttl-hours@ resolves to.
+  -- See 'runGraph' for why the defaults are fine here: the dumped
+  -- YAML embeds the TTL number for inspection; the actual run uses
+  -- whatever @--cache-ttl-hours@ resolves to. 'defaultDagSelection'
+  -- pins @platformFilter = []@ so the YAML reflects the canonical
+  -- fanout regardless of the @--platform@ knob on @run@.
   (pc, _) <- dieOnLeft =<< buildProcessCompose hosts defaultDagSelection DumpRun defaultCacheTtlHours
   BS.putStr (Y.encode pc)
 
@@ -442,23 +447,39 @@ data BuildGraphError
     --     Carries the bad name so the display rendering can echo it
     --     back to the user.
     BadRoot RecipeName
-  | -- | The root recipe declares OS attrs (e.g. @[linux] [macos]@),
-    --     but none of those families have a matching system configured
-    --     — neither @localPlatform@ nor any host in @hosts.json@.
-    --     Carries the root name + the unsatisfied OS families so the
-    --     display rendering names both.
-    EmptyFanout RecipeName [J.Os]
+  | -- | The platform fanout for this root collapsed to the empty
+    --     set. Carries the root name, the root's declared OS
+    --     families, the structural reason from 'pipelinePlatformsFor'
+    --     ('EmptyNaturalFanout' vs 'FilterExcludedAll'), and the
+    --     user's @--platform@ list — the last just to echo the
+    --     offending tokens back in the 'FilterExcludedAll' message.
+    --     The 'Display' instance pattern-matches on the cause, not on
+    --     the shape of the filter list, so the attribution can't drift
+    --     when both the natural fanout and the filter happen to be
+    --     empty.
+    EmptyFanout RecipeName [J.Os] EmptyFanoutCause [Platform]
   deriving stock (Show)
 
 instance Display BuildGraphError where
   displayBuilder (BadRoot r) =
     "--root " <> displayBuilder r <> " is not a recipe in the justfile"
-  displayBuilder (EmptyFanout rootName oss) =
+  displayBuilder (EmptyFanout rootName oss EmptyNaturalFanout _) =
     "root recipe declares OS attrs but no matching system is configured. "
       <> "Either remove the OS attrs from "
       <> displayBuilder rootName
       <> " or add an entry to ~/.config/justci/hosts.json for one of: "
       <> displayBuilder (T.pack (unwords (show <$> oss)))
+  displayBuilder (EmptyFanout rootName oss FilterExcludedAll filt) =
+    "--platform "
+      <> displayBuilder (T.intercalate ", " $ display <$> filt)
+      <> " excluded every platform for "
+      <> displayBuilder rootName
+      <> case oss of
+        [] -> ". That recipe has no OS-family attributes — it runs on the local platform only."
+        _ ->
+          "'s OS attrs ("
+            <> displayBuilder (T.pack $ unwords $ show <$> oss)
+            <> "). Drop the override or pick one that matches."
 
 -- | Walk @just --dump@ → root → reachable subgraph → topologically
 -- lowered DAG → fan out across the pipeline's platform set → filter
@@ -511,10 +532,9 @@ buildNodeGraph hosts sel = do
       reachable <- dieOnLeft $ reachableSubgraph rootName recipes
       recipeGraph <- dieOnLeft $ lowerToRunnerGraph reachable
       localPlat <- dieOnLeft localPlatform
-      let pipelinePlatforms = pipelinePlatformsFor rootRecipe localPlat hosts
-      case pipelinePlatforms of
-        [] -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe)))
-        _ -> do
+      case pipelinePlatformsFor sel.platformFilter rootRecipe localPlat hosts of
+        Left cause -> pure (Left (EmptyFanout rootName (rootOsFamilies rootRecipe) cause sel.platformFilter))
+        Right pipelinePlatforms -> do
           let unfilteredNodeGraph = fanOut localPlat hosts pipelinePlatforms recipeGraph
           nodeGraph <- dieOnLeft $ applySelectors sel.selectorMode pipelinePlatforms unfilteredNodeGraph
           pure (Right (nodeGraph, localPlat, recipes))

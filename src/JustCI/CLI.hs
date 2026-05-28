@@ -118,11 +118,12 @@ data ProtectOpts = ProtectOpts
 --   * @tui@: drive process-compose's TUI instead of its headless logger.
 --   * @hostOverrides@: overlay onto @~\/.config\/justci\/hosts.json@ via
 --     'JustCI.Hosts.mergeHostOverrides'; CLI entries win on collision.
---   * @dagSelection@: the DAG-shape choice — @--root@ override plus the
---     positional leaf selectors and @--no-deps@ flag, bundled into one
---     value so 'JustCI.Pipeline.buildProcessCompose' takes a single
---     'JustCI.Node.DagSelection' instead of three positional knobs (and
---     the @"--no-deps without selectors"@ illegal combination is
+--   * @dagSelection@: the DAG-shape choice — @--root@ override, the
+--     @--platform@ pre-fanout filter, the positional leaf selectors,
+--     and the @--no-deps@ flag — bundled into one value so
+--     'JustCI.Pipeline.buildProcessCompose' takes a single
+--     'JustCI.Node.DagSelection' instead of four positional knobs
+--     (and the @"--no-deps without selectors"@ illegal combination is
 --     unrepresentable at this layer).
 --
 -- The @--@-passthrough tail is /not/ a field on 'RunOpts': it lives
@@ -232,11 +233,11 @@ runOptsParser =
           <> help "On every remote setup, prune per-SHA cache dirs under $JUSTCI_CACHE_DIR (~/.local/state/justci by default) older than N hours. 0 disables eviction. The current run's dir is never evicted. See juspay/justci#39."
       )
 
--- | Parse @--root@ + positional selectors + @--no-deps@ into a single
--- 'DagSelection'. The empty-selectors case collapses to 'AllNodes' so
--- the @--no-deps@ flag silently has no effect without selectors —
--- matching @just@'s behaviour for the same flag, and making the
--- @"--no-deps without selectors"@ state unrepresentable in
+-- | Parse @--root@ + @--platform@ + positional selectors + @--no-deps@
+-- into a single 'DagSelection'. The empty-selectors case collapses to
+-- 'AllNodes' so the @--no-deps@ flag silently has no effect without
+-- selectors — matching @just@'s behaviour for the same flag, and
+-- making the @"--no-deps without selectors"@ state unrepresentable in
 -- 'SelectorMode' rather than relying on docstring discipline.
 dagSelectionParser :: Parser DagSelection
 dagSelectionParser =
@@ -247,6 +248,14 @@ dagSelectionParser =
           ( long "root"
               <> metavar "RECIPE"
               <> help "Use RECIPE as the DAG root instead of whichever recipe carries [metadata(\"ci\")]. The pipeline fans out across its OS attributes as usual."
+          )
+      )
+    <*> many
+      ( option
+          platformReader
+          ( long "platform"
+              <> metavar "PLATFORM"
+              <> help "Restrict the run to this platform; repeatable to opt into a subset (e.g. --platform x86_64-linux --platform aarch64-darwin). Without --platform, the pipeline fans out across every platform the root recipe's OS attributes permit. Intersected with the natural fanout — requested platforms outside it are silently dropped; an empty intersection errors. No effect on `dump-yaml`/`graph`/`protect`."
           )
       )
     <*> selectorModeParser
@@ -283,6 +292,18 @@ recipeNameReader = eitherReader $ \s ->
   if null s
     then Left "empty recipe name in --root"
     else Right (recipeNameFromText (T.pack s))
+
+-- | Parse a single @PLATFORM@ argument into a typed 'Platform'.
+-- The accepted vocabulary is the same as 'hostOverrideReader' — one
+-- of the 'JustCI.Platform.Platform' display renderings. Used by
+-- @--platform@ for the pre-fanout user filter; on parse failure the
+-- error names the supported set verbatim.
+platformReader :: ReadM Platform
+platformReader = eitherReader $ \s -> case parsePlatform (T.pack s) of
+  Just p -> Right p
+  Nothing ->
+    Left $
+      "unknown platform " <> s <> " in --platform (expected one of: " <> T.unpack supportedPlatformsLabel <> ")"
 
 -- | Parse a single @PLATFORM=ADDR@ argument into a typed pair. The
 -- platform must be one of the 'Platform' constructors'
