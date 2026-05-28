@@ -61,7 +61,8 @@ data CleanTreeError
 instance Display CleanTreeError where
   displayBuilder (CleanTreeSubprocess e) = displayBuilder e
   displayBuilder (DirtyTree paths) =
-    "working tree is dirty (CI=true requires a clean tree); commit or stash first:\n"
+    "working tree is dirty (strict mode requires a clean tree); commit or stash first, "
+      <> "or pass --no-strict (live tree, no GH posts) / --no-snapshot (skip the HEAD pin) to run anyway:\n"
       <> mconcat ["  " <> displayBuilder (T.pack p) <> "\n" | p <- paths]
 
 -- | Refuse the run if the working tree has uncommitted changes. Strict mode

@@ -207,9 +207,10 @@ data UpInvocation = UpInvocation
     -- | Where to write the YAML before spawning pc. Passed via @-f@.
     yamlPath :: FilePath,
     -- | Drive process-compose's TUI (@-t=true@) instead of headless
-    --     (@-t=false@). Only meaningful in 'JustCI.Pipeline.runLocal'; CI
-    --     mode normally wants headless, but the flag itself is mode-
-    --     agnostic at this layer.
+    --     (@-t=false@). Only meaningful when 'JustCI.Pipeline.runPipeline'
+    --     is driving an interactive session; strict-by-default runs
+    --     normally want headless, but the flag itself is mode-agnostic
+    --     at this layer.
     tui :: Bool,
     -- | Caller-supplied args appended verbatim after the canned
     --     baseline; the @ci run -- ...@ passthrough lands here.

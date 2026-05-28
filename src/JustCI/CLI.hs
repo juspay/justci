@@ -125,6 +125,20 @@ data ProtectOpts = ProtectOpts
 --     'JustCI.Node.DagSelection' instead of four positional knobs
 --     (and the @"--no-deps without selectors"@ illegal combination is
 --     unrepresentable at this layer).
+--   * @noStrict@ \/ @noSnapshot@ \/ @noPost@: three opt-outs the user
+--     can dial from full strict-by-default down to a no-frills dev
+--     run. Each names one axis ('JustCI.Pipeline.resolveRunPolicy'
+--     resolves the trio to a 'JustCI.Pipeline.RunPolicy'):
+--
+--       * @noPost@: skip GitHub commit-status posts. Clean-tree refuse
+--         and the HEAD worktree pin still apply.
+--       * @noSnapshot@: skip the clean-tree refuse and HEAD worktree
+--         pin. Implies @noPost@ — posting a SHA-tagged status against
+--         bytes that aren't @HEAD@ violates the "SHA matches tested
+--         bytes" invariant.
+--       * @noStrict@: meta — equivalent to @noSnapshot && noPost@. The
+--         one-flag dev-mode opt-out matching the common case where
+--         the user wants every strict-mode side effect disabled.
 --
 -- The @--@-passthrough tail is /not/ a field on 'RunOpts': it lives
 -- outside the optparse-parsed structure entirely, returned alongside
@@ -137,7 +151,10 @@ data RunOpts = RunOpts
     -- @0@ disables eviction; the current run's dir is never evicted.
     -- Threaded to 'JustCI.Transport.remoteEvictCacheShell' via
     -- 'JustCI.Pipeline.buildProcessCompose'. See juspay\/justci#39.
-    cacheTtlHours :: Int
+    cacheTtlHours :: Int,
+    noStrict :: Bool,
+    noSnapshot :: Bool,
+    noPost :: Bool
   }
 
 -- | Parse argv and return the structured 'Args' alongside the raw
@@ -231,6 +248,18 @@ runOptsParser =
           <> value defaultCacheTtlHours
           <> showDefault
           <> help "On every remote setup, prune per-SHA cache dirs under $JUSTCI_CACHE_DIR (~/.local/state/justci by default) older than N hours. 0 disables eviction. The current run's dir is never evicted. See juspay/justci#39."
+      )
+    <*> switch
+      ( long "no-strict"
+          <> help "Opt out of every strict-mode side effect: run against the live working tree (no clean-tree refuse, no HEAD worktree pin) and skip GitHub commit-status posts. The dev-mode shortcut, equivalent to `--no-snapshot --no-post`."
+      )
+    <*> switch
+      ( long "no-snapshot"
+          <> help "Run against the live working tree (skip the clean-tree refuse and the HEAD `git worktree` pin). Implies `--no-post` — a SHA-tagged GitHub status against unpinned bytes violates the reproducibility invariant. Distinct from process-compose's own `--no-snapshot` flag, which is forwarded after `--` if you need it."
+      )
+    <*> switch
+      ( long "no-post"
+          <> help "Skip GitHub commit-status posts. Clean-tree refuse and HEAD worktree pin still apply; useful for non-github strict consumers and for debugging strict runs without writing to the PR's checks list."
       )
 
 -- | Parse @--root@ + @--platform@ + positional selectors + @--no-deps@

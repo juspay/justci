@@ -68,6 +68,7 @@ test-suite justci-test
                       JustCI.FanoutSpec
                       JustCI.JustfileSpec
                       JustCI.NodeSpec
+                      JustCI.PipelineSpec
                       JustCI.PlatformSpec
                       JustCI.ProcessComposeSpec
                       JustCI.TransportSpec

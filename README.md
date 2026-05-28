@@ -10,18 +10,22 @@ just --dump → root → reachable subgraph → fan out per platform → process
 
 ## Modes
 
-Gated on the `CI` environment variable:
+**Strict by default.** `justci run` refuses a dirty tree, snapshots HEAD via `git worktree`, posts GitHub commit statuses, and routes per-recipe logs under `.ci/<sha>/<plat>/<recipe>.log`. Two flags relax pieces of that policy for the cases where it's wrong:
 
-| Mode | Trigger | Tree | Status posts | Runtime files |
+| Flag(s) | Tree | HEAD pin | Status posts | Runtime files |
 |---|---|---|---|---|
-| Local | `CI` unset | live working tree | none | `.ci/lock`, `.ci/pc.log`, `.ci/pc.sock` |
-| Strict | `CI=true` | `git worktree` pinned to HEAD | `<recipe>@<platform>` per transition | `.ci/lock`, `.ci/pc.log`, `.ci/pc.sock`, `.ci/worktree/`, `.ci/<sha>/<platform>/<recipe>.log` |
+| _(none — default)_ | clean (refuses dirty) | `git worktree` at HEAD | `<recipe>@<platform>` per transition | `.ci/lock`, `.ci/pc.log`, `.ci/pc.sock`, `.ci/worktree/`, `.ci/<sha>/<platform>/<recipe>.log` |
+| `--no-post` | clean | `git worktree` at HEAD | none | same as default (logs still SHA-keyed) |
+| `--no-snapshot` (implies `--no-post`) | live working tree | none | none | `.ci/lock`, `.ci/pc.log`, `.ci/pc.sock` |
+| `--no-strict` (meta — same as `--no-snapshot --no-post`) | live working tree | none | none | `.ci/lock`, `.ci/pc.log`, `.ci/pc.sock` |
 
-**Strict mode refuses to run if the working tree is dirty** — the SHA on the green check must match the bytes tested. Both modes take an exclusive `flock` on `.ci/lock`, so a second `justci run` in the same checkout fails fast with _"another justci run is in progress"_ instead of ghost-attaching to the first run's socket and posting stale check results. Runtime artifacts live under `$PWD/.ci/` (gitignored); the SHA-keyed log directory keeps prior runs alongside the latest.
+The dirty-tree refuse, `gh repo view`, and `git rev-parse HEAD` all run **before** `process-compose` starts — a misconfigured environment (dirty tree, missing `gh` auth, no github remote) halts at the front door, not mid-run. Both modes still take an exclusive `flock` on `.ci/lock`, so a second `justci run` in the same checkout fails fast with _"another justci run is in progress"_ instead of ghost-attaching to the first run's socket and posting stale check results. Runtime artifacts live under `$PWD/.ci/` (gitignored); the SHA-keyed log directory keeps prior runs alongside the latest.
+
+_The pre-flip `CI=true` env-var gate is gone. Existing scripts that set `CI=true` keep working — the var is now a harmless no-op, since strict is the default._
 
 ## Status mechanics
 
-A central observer subscribes to process-compose's `/process/states/ws` stream over a Unix domain socket and folds each transition into a per-node outcome map. The map drives the verdict (exit zero only if every node finished `Success`); in strict mode it's also translated to GitHub commit-status posts.
+A central observer subscribes to process-compose's `/process/states/ws` stream over a Unix domain socket and folds each transition into a per-node outcome map. The map drives the verdict (exit zero only if every node finished `Success`); when posts are enabled (default; suppressed by `--no-post` / `--no-snapshot` / `--no-strict`), it's also translated to GitHub commit-status posts.
 
 | Wire state | GH post | Notes |
 |---|---|---|
@@ -89,7 +93,7 @@ Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@hos
 
 **`--host PLATFORM=ADDR` overlays onto `hosts.json` for one invocation.** Repeatable; CLI entries win on collision. `justci run --host x86_64-linux=root@lxc-foo` redirects the linux lane to a throwaway LXC container without touching the JSON file. Platforms not named on the CLI still consult `hosts.json` as usual.
 
-**`--platform PLATFORM` restricts the fanout itself.** Repeatable; the pipeline universe becomes `(root OS families ∩ configured systems) ∩ --platform set`. `justci run --platform x86_64-linux` runs the linux lane only, regardless of how many other platforms the root recipe declares. Distinct from the positional `RECIPE@PLATFORM` selector: that pins one named recipe to one platform via post-fanout reachability; `--platform` slices the platform universe pre-fanout, so it composes orthogonally with positional selectors that don't name a platform (e.g. `justci run e2e --platform x86_64-linux` runs `e2e` + its deps on linux only). Works in `CI=true` strict mode too — handy for testing strict-mode behavior on one lane without the full remote fanout.
+**`--platform PLATFORM` restricts the fanout itself.** Repeatable; the pipeline universe becomes `(root OS families ∩ configured systems) ∩ --platform set`. `justci run --platform x86_64-linux` runs the linux lane only, regardless of how many other platforms the root recipe declares. Distinct from the positional `RECIPE@PLATFORM` selector: that pins one named recipe to one platform via post-fanout reachability; `--platform` slices the platform universe pre-fanout, so it composes orthogonally with positional selectors that don't name a platform (e.g. `justci run e2e --platform x86_64-linux` runs `e2e` + its deps on linux only). Composes with `--no-strict` / `--no-snapshot` / `--no-post` too — handy for testing strict-mode behavior on one lane without the full remote fanout.
 
 ## Subcommands
 
@@ -103,11 +107,14 @@ Host strings are whatever `ssh` knows how to dial — bare `hostname`, `user@hos
 ### `justci run`
 
 ```
-justci run [--tui] [--host PLATFORM=ADDR ...] [--platform PLATFORM ...] [--root RECIPE] [--no-deps] [--cache-ttl-hours N] [RECIPE[@PLATFORM]...] [-- <args>]
+justci run [--tui] [--no-strict | --no-snapshot | --no-post] [--host PLATFORM=ADDR ...] [--platform PLATFORM ...] [--root RECIPE] [--no-deps] [--cache-ttl-hours N] [RECIPE[@PLATFORM]...] [-- <args>]
 ```
 
 - `--tui` — swap process-compose's headless logger for its interactive tcell view; useful for poking at long-running pipelines locally
-- `--platform PLATFORM` — restrict the run to this platform; repeatable to opt into a subset (e.g. `--platform x86_64-linux --platform aarch64-darwin` runs two of three lanes). Intersected with the natural fanout: requested platforms outside it are silently dropped, an empty intersection errors with a message naming `--platform` as the cause. Works in `CI=true` strict mode too — useful for testing strict-mode behavior on one lane without spinning up every remote. See [_Platform fanout_](#platform-fanout).
+- `--no-strict` — dev-mode shortcut: run against the live working tree and skip GitHub commit-status posts (equivalent to `--no-snapshot --no-post`). The pre-flight (clean-tree refuse + `gh repo view` + `git rev-parse HEAD`) is skipped entirely, so a misconfigured environment doesn't block the run.
+- `--no-snapshot` — run against the live working tree (skip the clean-tree refuse and the HEAD `git worktree` pin). Implies `--no-post` — a SHA-tagged status against unpinned bytes violates the "SHA matches tested bytes" invariant. _Distinct from process-compose's own `--no-snapshot` flag (which is forwarded after `--`); same name, different layers._
+- `--no-post` — skip GitHub commit-status posts. Clean-tree refuse and HEAD worktree pin still apply; useful for non-github strict consumers and for debugging strict runs without writing to the PR's checks list.
+- `--platform PLATFORM` — restrict the run to this platform; repeatable to opt into a subset (e.g. `--platform x86_64-linux --platform aarch64-darwin` runs two of three lanes). Intersected with the natural fanout: requested platforms outside it are silently dropped, an empty intersection errors with a message naming `--platform` as the cause. Composes with the strict-mode opt-outs too — useful for testing strict-mode behavior on one lane without spinning up every remote. See [_Platform fanout_](#platform-fanout).
 - `--root RECIPE` — replace the DAG root that `[metadata("ci")]` would have picked
 - `--no-deps` — the `just`-style escape hatch: keep only the named selectors, skip their dependency closure (setup nodes still auto-included on remote platforms so the YAML doesn't reference dropped dependencies)
 - `--cache-ttl-hours N` — prune per-SHA cache dirs older than `N` hours on every remote setup (default 48). `0` disables eviction; the current run's dir is never evicted. See [_Remote builds over SSH_](#remote-builds-over-ssh).
