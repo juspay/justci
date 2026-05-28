@@ -25,13 +25,15 @@ module JustCI.Hosts
 
     -- * Construction
     hostFromText,
-    hostsFromList,
     mergeHostOverrides,
 
     -- * Loading + lookup
     loadHosts,
     lookupHost,
     hostsPlatforms,
+
+    -- * Internal (exposed for tests)
+    hostsFromList,
   )
 where
 
@@ -63,11 +65,10 @@ newtype Host = Host Text
 hostFromText :: Text -> Host
 hostFromText = Host
 
--- | Construct a 'Hosts' from a flat list. Last entry wins on
--- duplicate keys ('Map.fromList' semantics). The non-IO companion to
--- 'loadHosts'; used by tests and by callers that already have an
--- in-memory mapping (e.g. one assembled from CLI args before the
--- file is loaded) so they don't need to round-trip through JSON.
+-- | Internal smart constructor — currently the only consumer is
+-- 'JustCI.FanoutSpec', so the test suite can build a 'Hosts' without
+-- exposing the newtype constructor. Last entry wins on duplicate keys
+-- ('Map.fromList' semantics). Production paths use 'loadHosts'.
 hostsFromList :: [(Platform, Host)] -> Hosts
 hostsFromList = Hosts . Map.fromList
 
