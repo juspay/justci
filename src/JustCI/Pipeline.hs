@@ -156,36 +156,42 @@ withCiLock lockPath sockFile action =
         action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
 
--- | Resolved policy for one pipeline run. Two independent axes the
--- strict-vs-dev decomposition fans into:
+-- | Resolved policy for one pipeline run. A three-constructor sum
+-- over the valid policy states — the structurally incoherent
+-- combination "post enabled without a snapshot" is unrepresentable
+-- by construction (rather than ruled out at the value layer by a
+-- separate enforcement step).
 --
---   * 'snapshot' — the reproducibility axis. 'Just' means clean-tree
---     refuse + HEAD @git worktree@ pin + SHA-keyed log routing (the
---     artefacts each step needs travel inside 'SnapshotPolicy').
---     'Nothing' means run against the live working tree, no SHA
---     known.
---   * 'post' — the GitHub-integration axis. Only meaningful when
---     'snapshot' is 'Just' (posting a SHA-tagged status against
---     unpinned bytes breaks the "SHA matches tested bytes"
---     invariant); 'resolveRunPolicy' enforces @post == False@
---     whenever @snapshot == Nothing@.
+--   * 'NoSnapshot' — live working tree, no GH posts. The dev arm:
+--     @--no-strict@ or @--no-snapshot@. No pre-flight IO incurred.
+--   * 'SnapshotOnly' — clean-tree refuse + HEAD @git worktree@ pin
+--     + SHA-keyed log routing, but /no/ GH commit-status posts.
+--     The @--no-post@ arm: for non-github strict consumers and for
+--     debugging strict runs without writing to the PR's checks
+--     list.
+--   * 'SnapshotAndPost' — same plus GH posts. Default of
+--     @nix run . -- run@.
 --
--- The shape rules out the only structurally-incoherent mix
--- ('post' on without 'snapshot'); the other three combinations all
--- make sense — full strict (default), snapshot without posts
--- (@--no-post@), and live tree (@--no-snapshot@ / @--no-strict@).
-data RunPolicy = RunPolicy
-  { snapshot :: Maybe SnapshotPolicy,
-    post :: Bool
-  }
+-- 'SnapshotPolicy' carries the artefacts both snapshot arms need
+-- (repo, SHA, worktree dir, log dir); the post-vs-no-post decision
+-- lives in the constructor name, not as a field inside the
+-- artefacts record. Keeps 'SnapshotPolicy' purely descriptive.
+data RunPolicy
+  = NoSnapshot
+  | SnapshotOnly SnapshotPolicy
+  | SnapshotAndPost SnapshotPolicy
 
 -- | The artefacts a snapshotted run needs, bundled at one populate
 -- site ('resolveRunPolicy'). 'snapRepo' + 'snapSha' feed
--- 'postStatusFor' when 'RunPolicy.post' is 'True' (the SHA is also
+-- 'postStatusFor' on the 'SnapshotAndPost' arm (the SHA is also
 -- threaded into the SSH bundle for remote lanes via
 -- 'JustCI.Transport'); 'snapWorktreeDir' is the @git worktree@ root
 -- every local recipe @chdir@s into; 'snapLogDir' is the SHA-keyed
 -- log root the YAML emitter routes per-recipe stdout/stderr to.
+--
+-- Holds no policy flags — the post-vs-no-post choice rides on the
+-- 'RunPolicy' constructor instead, so this record stays a pure
+-- "facts about the snapshot the resolver discovered" carrier.
 data SnapshotPolicy = SnapshotPolicy
   { snapRepo :: Repo,
     snapSha :: Sha,
@@ -251,24 +257,19 @@ policyShape opts
 -- shape's verdict, fetch the artefacts the snapshot arm needs.
 resolveRunPolicy :: RunOpts -> RunDir -> IO RunPolicy
 resolveRunPolicy opts dirs = case policyShape opts of
-  PolicyShape {wantSnapshot = False} ->
-    pure RunPolicy {snapshot = Nothing, post = False}
-  PolicyShape {wantSnapshot = True, wantPost = postIt} -> do
+  PolicyShape {wantSnapshot = False} -> pure NoSnapshot
+  PolicyShape {wantSnapshot = True, wantPost = wantP} -> do
     dieOnLeft =<< ensureCleanTree
     repo <- dieOnLeft =<< viewRepo
     sha <- dieOnLeft =<< resolveSha
-    pure
-      RunPolicy
-        { snapshot =
-            Just
-              SnapshotPolicy
-                { snapRepo = repo,
-                  snapSha = sha,
-                  snapWorktreeDir = dirs.worktreePath,
-                  snapLogDir = logDirFor sha
-                },
-          post = postIt
-        }
+    let snap =
+          SnapshotPolicy
+            { snapRepo = repo,
+              snapSha = sha,
+              snapWorktreeDir = dirs.worktreePath,
+              snapLogDir = logDirFor sha
+            }
+    pure $ if wantP then SnapshotAndPost snap else SnapshotOnly snap
 
 -- | The single entry point for @justci run@. Resolves the user's
 -- opt-out flags into a 'RunPolicy' via 'resolveRunPolicy' (which
@@ -308,16 +309,13 @@ runPipeline opts passthrough dirs = do
   policy <- resolveRunPolicy opts dirs
   withCiLock dirs.lock dirs.sock $ do
     hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-    let mode = case policy.snapshot of
-          Just s -> PinnedRun s.snapWorktreeDir s.snapLogDir
-          Nothing -> LiveRun
-        withMaybeSnapshot = case policy.snapshot of
-          Just s -> withSnapshotWorktree s.snapWorktreeDir
-          Nothing -> id
+    let (mode, withMaybeSnapshot, mLogDir) = case snapshotOf policy of
+          Just s -> (PinnedRun s.snapWorktreeDir s.snapLogDir, withSnapshotWorktree s.snapWorktreeDir, Just s.snapLogDir)
+          Nothing -> (LiveRun, id, Nothing)
     withMaybeSnapshot $ do
       (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection mode opts.cacheTtlHours
       let nodes = processNames pc
-      for_ policy.snapshot $ \s -> createPlatformDirs s.snapLogDir nodes
+      for_ mLogDir $ \ld -> createPlatformDirs ld nodes
       outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
       onState <- buildOnState policy recipes outcomes
       withObserver dirs.sock onState $
@@ -325,20 +323,30 @@ runPipeline opts passthrough dirs = do
           runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
       exitWithVerdict (hostFor hosts) outcomes
 
+-- | Project the 'RunPolicy' sum to its inner 'SnapshotPolicy', if
+-- any. Used by 'runPipeline' to share the (worktree, log dir, mode)
+-- choices across both snapshot arms ('SnapshotOnly' and
+-- 'SnapshotAndPost'): they make identical decisions about
+-- @withSnapshotWorktree@, the YAML mode, and the platform-dir
+-- materialisation; only the @onState@ fan differs.
+snapshotOf :: RunPolicy -> Maybe SnapshotPolicy
+snapshotOf NoSnapshot = Nothing
+snapshotOf (SnapshotOnly s) = Just s
+snapshotOf (SnapshotAndPost s) = Just s
+
 -- | Build the @onState@ callback the observer subscribes to. The
 -- local outcome accumulator runs unconditionally; the GH-status
--- poster is composed on top only when the policy carries both a
--- snapshot (for the SHA + repo + log dir) and @post = True@. Lifted
--- out of 'runPipeline' so the call-site reads as one composition
--- rather than a four-arm pattern match buried in a @let@.
+-- poster is composed on top only on the 'SnapshotAndPost' arm —
+-- pattern matching on the 'RunPolicy' sum makes the three-state
+-- dispatch flat (no nested @Maybe@-unwrap + @Bool@-test).
 buildOnState ::
   RunPolicy ->
   Map.Map RecipeName Recipe ->
   -- | Local outcome accumulator (from 'newOutcomes').
   Outcomes ->
   IO (ProcessState -> IO ())
-buildOnState policy recipes outcomes = case (policy.snapshot, policy.post) of
-  (Just s, True) -> do
+buildOnState policy recipes outcomes = case policy of
+  SnapshotAndPost s -> do
     timings <- newTimings
     pure $ \ps -> withParsedNode ps $ \node ->
       postStatusFor timings s.snapRepo s.snapSha s.snapLogDir recipes node ps
