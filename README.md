@@ -10,7 +10,7 @@ just --dump → root → reachable subgraph → fan out per platform → process
 
 ## Modes
 
-**Strict by default.** `justci run` refuses a dirty tree, snapshots HEAD via `git worktree`, posts GitHub commit statuses, and routes per-recipe logs under `.ci/<sha>/<plat>/<recipe>.log`. Two flags relax pieces of that policy for the cases where it's wrong:
+**Strict by default.** `justci run` refuses a dirty tree, snapshots HEAD via `git worktree`, posts GitHub commit statuses, and routes per-recipe logs under `.ci/<sha>/<plat>/<recipe>.log`. Three flags relax pieces of that policy for the cases where it's wrong:
 
 | Flag(s) | Tree | HEAD pin | Status posts | Runtime files |
 |---|---|---|---|---|
