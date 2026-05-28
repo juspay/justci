@@ -6,6 +6,7 @@ import qualified JustCI.CommitStatusSpec
 import qualified JustCI.FanoutSpec
 import qualified JustCI.JustfileSpec
 import qualified JustCI.NodeSpec
+import qualified JustCI.PipelineSpec
 import qualified JustCI.PlatformSpec
 import qualified JustCI.ProcessComposeSpec
 import qualified JustCI.TransportSpec
@@ -18,6 +19,7 @@ main = hspec $ do
   JustCI.FanoutSpec.spec
   JustCI.JustfileSpec.spec
   JustCI.NodeSpec.spec
+  JustCI.PipelineSpec.spec
   JustCI.PlatformSpec.spec
   JustCI.ProcessComposeSpec.spec
   JustCI.TransportSpec.spec

@@ -4,7 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Orchestration for the per-subcommand entry points
--- ('runLocal', 'runStrict', 'runGraph', 'runDumpYaml', 'runProtect')
+-- ('runPipeline', 'runGraph', 'runDumpYaml', 'runProtect')
 -- and the runtime artifact layout under @\$PWD\/.ci\/@. "Main" is the
 -- dispatch layer; everything mode-specific lives here. The pure graph
 -- shape change (recipe DAG → platform-fanned NodeId DAG, plus the
@@ -18,8 +18,7 @@ module JustCI.Pipeline
     ensureRunDir,
 
     -- * Run modes
-    runLocal,
-    runStrict,
+    runPipeline,
     runGraph,
     runDumpYaml,
     runProtect,
@@ -30,6 +29,14 @@ module JustCI.Pipeline
     BuildGraphError,
     buildNodeGraph,
     buildProcessCompose,
+
+    -- * === Internal (exposed for tests) ===
+
+    -- | 'PolicyShape' and 'policyShape' are exported so
+    -- "JustCI.PipelineSpec" can unit-test the flag-folding rules
+    -- without faking @gh@\/@git@ subprocesses.
+    PolicyShape (..),
+    policyShape,
   )
 where
 
@@ -49,7 +56,7 @@ import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import JustCI.CLI (PcVerb, ProtectOpts (..), RunOpts (..), pcVerbArg)
 import JustCI.CommitStatus (contextForNode, isBodyBearing, isRequiredCheck, newTimings, postStatusFor)
 import JustCI.Fanout (EmptyFanoutCause (..), applySelectors, fanOut, isRemote, pipelinePlatformsFor, rootOsFamilies)
-import JustCI.Gh (setRequiredChecks, viewDefaultBranch, viewRepo)
+import JustCI.Gh (Repo, setRequiredChecks, viewDefaultBranch, viewRepo)
 import JustCI.Git (Sha, ensureCleanTree, resolveSha, shaPlaceholder, withSnapshotWorktree)
 import JustCI.Graph (lowerToRunnerGraph, reachableSubgraph)
 import JustCI.Hosts (Hosts, loadHosts, lookupHost, mergeHostOverrides)
@@ -62,7 +69,7 @@ import JustCI.ProcessCompose (ProcessCompose, UpInvocation (..), processGraph, p
 import JustCI.ProcessCompose.Events (ProcessState (..), subscribeStates)
 import JustCI.Root (findRoot)
 import JustCI.Transport (defaultCacheTtlHours, sshRecipeCommand, sshSetupCommand)
-import JustCI.Verdict (exitWithVerdict, newOutcomes, recordOutcome)
+import JustCI.Verdict (Outcomes, exitWithVerdict, newOutcomes, recordOutcome)
 import System.Directory (createDirectoryIfMissing, doesPathExist, getCurrentDirectory, removeFile)
 import System.Exit (ExitCode, die)
 import System.FilePath (takeDirectory, (</>))
@@ -70,9 +77,8 @@ import System.IO (IOMode (..), withFile)
 import System.IO.Error (isDoesNotExistError)
 
 -- | The runtime artifact paths under @\$PWD\/.ci\/@. Built once at the top
--- of a run so 'runLocal' and 'runStrict' both reference the same
--- convention instead of hand-rolling @runDir \<\/\> "pc.log"@ at each
--- call site.
+-- of a run so every subcommand references the same convention
+-- instead of hand-rolling @runDir \<\/\> "pc.log"@ at each call site.
 data RunDir = RunDir
   { worktreePath :: FilePath,
     sock :: FilePath,
@@ -153,79 +159,210 @@ withCiLock lockPath sockFile action =
         action
       else die $ "another justci run is in progress (lock held on " <> lockPath <> ")"
 
--- | Local mode: live working tree, no GitHub status posts, no per-recipe
--- log routing. The observer still runs — its only consumer is the
--- verdict accumulator, which gives developer runs the same end-of-run
--- summary strict mode produces. Process-compose's log goes to
--- @.ci\/pc.log@ so even local runs don't leak into @\$TMPDIR@; the same
--- UDS at @.ci\/pc.sock@ is bound so the API surface is available for
--- future consumers (e.g. an MCP server).
+-- | Resolved policy for one pipeline run. A three-constructor sum
+-- over the valid policy states — the structurally incoherent
+-- combination "post enabled without a snapshot" is unrepresentable
+-- by construction (rather than ruled out at the value layer by a
+-- separate enforcement step).
 --
--- SSH lanes are supported in local mode too: any non-local platform
--- in the pipeline requires a @~\/.config\/justci\/hosts.json@ entry (the
--- user opts in by editing the file; missing entries are excluded
--- from the fanout by 'pipelinePlatformsFor'). Each remote lane gets
--- an SSH-shaped @command@ that bundles @HEAD@ across rather than
--- the dirty live tree — the dev's uncommitted work is intentionally
--- invisible to remote lanes; the bundle reflects committed history
--- only.
-runLocal :: RunOpts -> [String] -> RunDir -> IO ()
-runLocal opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
-  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection LocalRun opts.cacheTtlHours
-  outcomes <- newOutcomes (filter (isBodyBearing recipes) (processNames pc))
-  let onState ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
-  withObserver dirs.sock onState $
-    void $
-      runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
-  exitWithVerdict (hostFor hosts) outcomes
+--   * 'NoSnapshot' — live working tree, no GH posts. The dev arm:
+--     @--no-strict@ or @--no-snapshot@. No pre-flight IO incurred.
+--   * 'SnapshotOnly' — clean-tree refuse + HEAD @git worktree@ pin
+--     + SHA-keyed log routing, but /no/ GH commit-status posts.
+--     The @--no-post@ arm: for non-github strict consumers and for
+--     debugging strict runs without writing to the PR's checks
+--     list.
+--   * 'SnapshotAndPost' — same plus GH posts. Default of
+--     @nix run . -- run@.
+--
+-- 'SnapshotPolicy' carries the artefacts both snapshot arms need
+-- (repo, SHA, worktree dir, log dir); the post-vs-no-post decision
+-- lives in the constructor name, not as a field inside the
+-- artefacts record. Keeps 'SnapshotPolicy' purely descriptive.
+data RunPolicy
+  = NoSnapshot
+  | SnapshotOnly SnapshotPolicy
+  | SnapshotAndPost SnapshotPolicy
 
--- | Strict mode: clean-tree refuse → resolve repo + SHA → snapshot HEAD
--- via @git worktree@ at @.ci\/worktree@ → start process-compose with its
--- API on @.ci\/pc.sock@ → subscribe to state events, post commit
--- statuses, and accumulate the per-node outcome map concurrently with
--- the pipeline run.
+-- | The artefacts a snapshotted run needs, bundled at one populate
+-- site ('resolveRunPolicy'). 'snapRepo' + 'snapSha' feed
+-- 'postStatusFor' on the 'SnapshotAndPost' arm (the SHA is also
+-- threaded into the SSH bundle for remote lanes via
+-- 'JustCI.Transport'); 'snapWorktreeDir' is the @git worktree@ root
+-- every local recipe @chdir@s into; 'snapLogDir' is the SHA-keyed
+-- log root the YAML emitter routes per-recipe stdout/stderr to.
 --
--- Per-node stdout/stderr is split into
--- @.ci\/\<sha\>\/\<platform\>\/\<recipe\>.log@ (created here before
--- process-compose spawns) so each GitHub commit status can carry a
--- navigable path to the matching log. The SHA-keyed directory keeps
--- history across runs: a green-then-red sequence on the same checkout
--- leaves both runs' logs side-by-side under @.ci\/@.
+-- Holds no policy flags — the post-vs-no-post choice rides on the
+-- 'RunPolicy' constructor instead, so this record stays a pure
+-- "facts about the snapshot the resolver discovered" carrier.
+data SnapshotPolicy = SnapshotPolicy
+  { snapRepo :: Repo,
+    snapSha :: Sha,
+    snapWorktreeDir :: FilePath,
+    snapLogDir :: FilePath
+  }
+
+-- | Pure projection of the strict-vs-dev flag triple
+-- (@--no-strict@, @--no-snapshot@, @--no-post@) onto the three
+-- valid resolved-policy states. A sum with one constructor per
+-- valid state — rather than a 'Bool'-pair record — so the
+-- "@post@ without snapshot" combination is unrepresentable at
+-- the type level rather than enforced at the value layer.
 --
--- The two consumers of the state stream — 'postStatusFor' (GitHub
--- write) and 'recordOutcome' (local accumulator) — are composed at
--- this single call site rather than entangled inside the observer or
--- the GH-posting code. Both share
--- 'JustCI.ProcessCompose.Events.psToTerminalStatus' as the underlying
--- terminal-state classifier, so the GH check page and the local
--- verdict agree on which nodes succeeded.
+--   * 'DevMode' — live working tree, no GH posts. The opt-out
+--     arm: @--no-strict@ (the shortcut) or @--no-snapshot@.
+--   * 'StrictNoPost' — snapshot engaged (clean-tree refuse + HEAD
+--     pin) but GH posts skipped. The @--no-post@ arm.
+--   * 'FullStrict' — snapshot engaged + GH posts. The default of
+--     @nix run . -- run@ (no opt-out flags).
+--
+-- Flag interactions fold into the resolution at one site
+-- ('policyShape') rather than at the CLI parser layer — every
+-- 'RunOpts' value lands on exactly one constructor:
+--
+--   * @--no-strict@ is the dev-mode shortcut: equivalent to passing
+--     both @--no-snapshot@ and @--no-post@.
+--   * @--no-snapshot@ subsumes @--no-post@ — a SHA-tagged status
+--     posted against bytes that aren't @HEAD@ violates the
+--     "SHA matches tested bytes" invariant, so any @--no-snapshot@
+--     run lands on 'DevMode' regardless of @--no-post@'s value.
+--   * @--no-post@ alone keeps snapshot engaged: for non-github
+--     strict consumers and for debugging strict runs without
+--     writing to the PR's checks list.
+--
+-- Separated from 'resolveRunPolicy' so the boolean-folding rules
+-- are unit-testable without faking @gh@\/@git@ subprocesses.
+data PolicyShape
+  = DevMode
+  | StrictNoPost
+  | FullStrict
+  deriving stock (Eq, Show)
+
+-- | Reduce the user's three opt-out flags to a 'PolicyShape'. See
+-- the 'PolicyShape' haddock for the resolution rules and the
+-- mapping from constructor → strict-mode side effects.
+policyShape :: RunOpts -> PolicyShape
+policyShape opts
+  | opts.noStrict || opts.noSnapshot = DevMode
+  | opts.noPost = StrictNoPost
+  | otherwise = FullStrict
+
+-- | Resolve the user's flags into a 'RunPolicy', performing every
+-- fail-fast check before returning.
+--
+-- Dirty-tree refuse, @gh repo view@ (for the repo lookup), and
+-- @git rev-parse HEAD@ (for the SHA) all run here — /before/
+-- 'withCiLock' takes the lock, /before/ @process-compose@ starts,
+-- /before/ any pipeline machinery boots. The contract is "failure
+-- before CI even starts": a misconfigured environment (dirty tree,
+-- no @gh@ auth, no github remote) halts at the front door, not
+-- mid-run.
+--
+-- The flag-to-decision projection lives in 'policyShape' (pure,
+-- unit-tested). This resolver only owns the IO side: given the
+-- shape's verdict, fetch the artefacts the snapshot arm needs.
+resolveRunPolicy :: RunOpts -> RunDir -> IO RunPolicy
+resolveRunPolicy opts dirs = case policyShape opts of
+  DevMode -> pure NoSnapshot
+  StrictNoPost -> snapshotted SnapshotOnly
+  FullStrict -> snapshotted SnapshotAndPost
+  where
+    snapshotted ctor = do
+      dieOnLeft =<< ensureCleanTree
+      repo <- dieOnLeft =<< viewRepo
+      sha <- dieOnLeft =<< resolveSha
+      pure . ctor $
+        SnapshotPolicy
+          { snapRepo = repo,
+            snapSha = sha,
+            snapWorktreeDir = dirs.worktreePath,
+            snapLogDir = logDirFor sha
+          }
+
+-- | The single entry point for @justci run@. Resolves the user's
+-- opt-out flags into a 'RunPolicy' via 'resolveRunPolicy' (which
+-- performs every fail-fast check before returning), takes the
+-- per-checkout lock, then drives the pipeline against the policy
+-- the resolver returned.
+--
+-- The two axes the old @runLocal@\/@runStrict@ split bundled now
+-- compose explicitly here:
+--
+--   * Snapshot ('RunPolicy.snapshot') controls whether the
+--     'withSnapshotWorktree' bracket wraps the run, which 'RunMode'
+--     the YAML emitter sees ('PinnedRun' vs 'LiveRun'), and whether
+--     'createPlatformDirs' materialises the SHA-keyed log
+--     directories.
+--   * Post ('RunPolicy.post') controls whether the @onState@
+--     callback fans into 'postStatusFor' alongside 'recordOutcome',
+--     or just 'recordOutcome' on its own. The local verdict
+--     accumulator runs unconditionally so every mode produces the
+--     same @── ci run summary ──@ tail.
 --
 -- Process-compose's own exit code is intentionally ignored — with
 -- @restart: no@ on every process it no longer reflects pipeline
 -- outcome (a failed node leaves pc exiting 0). The accumulated
--- outcome map is the source of truth; 'exitWithVerdict' derives the
--- final 'ExitCode' from it.
-runStrict :: RunOpts -> [String] -> RunDir -> IO ()
-runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
-  dieOnLeft =<< ensureCleanTree
-  repo <- dieOnLeft =<< viewRepo
-  sha <- dieOnLeft =<< resolveSha
-  hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
-  let logDir = logDirFor sha
-  withSnapshotWorktree dirs.worktreePath $ do
-    (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection (StrictRun dirs.worktreePath logDir) opts.cacheTtlHours
-    let nodes = processNames pc
-    createPlatformDirs logDir nodes
-    outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
+-- outcome map is the source of truth; 'exitWithVerdict' derives
+-- the final 'ExitCode' from it.
+--
+-- SSH lanes are supported in every mode. Each non-local platform
+-- in the pipeline needs a @~\/.config\/justci\/hosts.json@ entry
+-- (the user opts in by editing the file; missing entries are
+-- excluded from the fanout by 'pipelinePlatformsFor'). Remote lanes
+-- always run against a @git bundle@ of @HEAD@ — uncommitted work
+-- is intentionally invisible to remote recipes, regardless of
+-- @--no-snapshot@.
+runPipeline :: RunOpts -> [String] -> RunDir -> IO ()
+runPipeline opts passthrough dirs = do
+  policy <- resolveRunPolicy opts dirs
+  withCiLock dirs.lock dirs.sock $ do
+    hosts <- mergeHostOverrides opts.hostOverrides <$> (dieOnLeft =<< loadHosts)
+    let (mode, withMaybeSnapshot, mLogDir) = case snapshotOf policy of
+          Just s -> (PinnedRun s.snapWorktreeDir s.snapLogDir, withSnapshotWorktree s.snapWorktreeDir, Just s.snapLogDir)
+          Nothing -> (LiveRun, id, Nothing)
+    withMaybeSnapshot $ do
+      (pc, recipes) <- dieOnLeft =<< buildProcessCompose hosts opts.dagSelection mode opts.cacheTtlHours
+      let nodes = processNames pc
+      for_ mLogDir $ \ld -> createPlatformDirs ld nodes
+      outcomes <- newOutcomes (filter (isBodyBearing recipes) nodes)
+      onState <- buildOnState policy recipes outcomes
+      withObserver dirs.sock onState $
+        void $
+          runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
+      exitWithVerdict (hostFor hosts) outcomes
+
+-- | Project the 'RunPolicy' sum to its inner 'SnapshotPolicy', if
+-- any. Used by 'runPipeline' to share the (worktree, log dir, mode)
+-- choices across both snapshot arms ('SnapshotOnly' and
+-- 'SnapshotAndPost'): they make identical decisions about
+-- @withSnapshotWorktree@, the YAML mode, and the platform-dir
+-- materialisation; only the @onState@ fan differs.
+snapshotOf :: RunPolicy -> Maybe SnapshotPolicy
+snapshotOf NoSnapshot = Nothing
+snapshotOf (SnapshotOnly s) = Just s
+snapshotOf (SnapshotAndPost s) = Just s
+
+-- | Build the @onState@ callback the observer subscribes to. The
+-- local outcome accumulator runs unconditionally; the GH-status
+-- poster is composed on top only on the 'SnapshotAndPost' arm —
+-- pattern matching on the 'RunPolicy' sum makes the three-state
+-- dispatch flat (no nested @Maybe@-unwrap + @Bool@-test).
+buildOnState ::
+  RunPolicy ->
+  Map.Map RecipeName Recipe ->
+  -- | Local outcome accumulator (from 'newOutcomes').
+  Outcomes ->
+  IO (ProcessState -> IO ())
+buildOnState policy recipes outcomes = case policy of
+  SnapshotAndPost s -> do
     timings <- newTimings
-    let onState ps = withParsedNode ps $ \node ->
-          postStatusFor timings repo sha logDir recipes node ps
-            >> recordOutcome outcomes node ps
-    withObserver dirs.sock onState $
-      void $
-        runProcessCompose (UpInvocation dirs.sock dirs.pcLog dirs.pcYaml opts.tui passthrough) pc
-    exitWithVerdict (hostFor hosts) outcomes
+    pure $ \ps -> withParsedNode ps $ \node ->
+      postStatusFor timings s.snapRepo s.snapSha s.snapLogDir recipes node ps
+        >> recordOutcome outcomes node ps
+  NoSnapshot -> pure recordOnly
+  SnapshotOnly _ -> pure recordOnly
+  where
+    recordOnly ps = withParsedNode ps $ \node -> recordOutcome outcomes node ps
 
 -- | Print the assembled pipeline's dependency graph to stdout in
 -- Mermaid @flowchart@ syntax. Uses the same 'DumpRun' shape
@@ -240,8 +377,8 @@ runStrict opts passthrough dirs = withCiLock dirs.lock dirs.sock $ do
 -- visualise.
 --
 -- Read-only: 'justci graph' must not create @.ci\/@ as a side effect.
--- That's why this takes no 'RunDir' — only 'runLocal' and
--- 'runStrict' need the runtime-artifact paths.
+-- That's why this takes no 'RunDir' — only 'runPipeline' needs
+-- the runtime-artifact paths.
 runGraph :: IO ()
 runGraph = do
   hosts <- dieOnLeft =<< loadHosts
@@ -373,8 +510,9 @@ withParsedNode ps action = for_ (parseNodeId ps.name) action
 -- and a clean @wait@ on it: spawn the observer, 'link' so its crash
 -- aborts the caller, run @body@, then 'wait' for the WebSocket to
 -- close (which it does when process-compose exits). The
--- async-lifecycle scaffold lives here so 'runLocal' and 'runStrict'
--- vary only in their @onState@ callback and the body they pass.
+-- async-lifecycle scaffold lives here so 'runPipeline' can vary
+-- only in the @onState@ callback 'buildOnState' returns and the
+-- body it passes.
 withObserver :: FilePath -> (ProcessState -> IO ()) -> IO a -> IO a
 withObserver sockP onState body =
   withAsync (subscribeStates sockP onState) $ \obs -> do
@@ -383,31 +521,44 @@ withObserver sockP onState body =
     wait obs
     pure result
 
--- | The two pipeline-build modes. 'LocalRun' is the @dev@ / @dump-yaml@
--- shape: no worktree pin, no per-recipe log routing. 'StrictRun'
--- carries the two paths that always travel together — the @git
--- worktree@ snapshot every local recipe @chdir@s into, and the
--- @.ci\/\<sha\>\/@ log directory the YAML emitter routes each
--- process's stdout/stderr to. A sum type instead of two parallel
--- @Maybe FilePath@s rules out the mixed @(Just, Nothing)@ /
--- @(Nothing, Just)@ states that produce logically inconsistent YAML.
+-- | The three YAML-emission shapes 'buildProcessCompose' produces.
+-- The constructors name the YAML-path axis they actually
+-- encapsulate — whether per-node @working_dir@ / log-file paths
+-- get pinned into the emitted YAML — and not the user-visible
+-- run-mode they originally tracked:
+--
+--   * 'LiveRun' — no path pinning: recipes run in the inherited cwd,
+--     logs go to process-compose's default. Used by 'runPipeline'
+--     when 'RunPolicy.snapshot' is 'Nothing'.
+--   * 'PinnedRun' — both paths injected. Local recipes @chdir@ into
+--     the @git worktree@ root; per-recipe stdout/stderr lands under
+--     @.ci\/\<sha\>\/\<platform\>\/\<recipe\>.log@. Used by
+--     'runPipeline' under a 'SnapshotPolicy'.
+--   * 'DumpRun' — no path pinning /and/ no host-resolution side
+--     effects. Missing 'JustCI.Hosts.Host' entries are tolerated;
+--     SSH-lane commands render with a placeholder so the structural
+--     keys (process names, depends_on edges) still reflect the real
+--     fanout. Used by 'runDumpYaml' \/ 'runGraph' \/ 'runProtect'
+--     so they work offline, outside a git checkout, and on the
+--     macos remote's smoke test where stdin is closed and prompting
+--     would deadlock.
+--
+-- A sum type instead of two parallel @Maybe FilePath@s rules out
+-- the mixed @(Just, Nothing)@ \/ @(Nothing, Just)@ states that
+-- produce logically inconsistent YAML, and gives 'DumpRun' a slot
+-- distinct from 'LiveRun' even though both project to the same
+-- @yamlPathsFor@ result — they differ in the host-resolution +
+-- SHA-placeholder behaviour 'buildProcessCompose' branches on.
 data RunMode
-  = LocalRun
-  | -- | @StrictRun worktreeDir logDir@.
-    StrictRun FilePath FilePath
-  | -- | YAML-inspection mode for @dump-yaml@: no working dir, no log
-    --       routing, and (importantly) no host resolution side effects.
-    --       Missing 'JustCI.Hosts.Host' entries are tolerated; SSH-lane
-    --       commands render with a placeholder so the structural keys
-    --       (process names, depends_on edges) still reflect the real
-    --       fanout. Used by the macos remote's smoke test where stdin is
-    --       closed and prompting would deadlock.
-    DumpRun
+  = LiveRun
+  | -- | @PinnedRun worktreeDir logDir@.
+    PinnedRun FilePath FilePath
+  | DumpRun
 
 -- | The two YAML-shape projections of 'RunMode': the per-node working
 -- directory every recipe @chdir@s into, and the per-node log location
 -- the YAML emitter routes stdout/stderr to. Both vary together across
--- modes — 'StrictRun' supplies both; 'LocalRun' and 'DumpRun' supply
+-- modes — 'PinnedRun' supplies both; 'LiveRun' and 'DumpRun' supply
 -- neither — so they live in a single 'RunMode'-pattern-match rather
 -- than two parallel where-clauses that have to stay in lockstep
 -- across future 'RunMode' constructors.
@@ -427,17 +578,17 @@ data RunMode
 -- look. Same predicate, different consumers, different visibility
 -- goals.
 yamlPathsFor :: RunMode -> (NodeId -> Maybe FilePath, NodeId -> Maybe FilePath)
-yamlPathsFor (StrictRun wt ld) = (workingDirFor wt, Just . logPathFor ld)
+yamlPathsFor (PinnedRun wt ld) = (workingDirFor wt, Just . logPathFor ld)
   where
     workingDirFor _ (SetupNode _) = Nothing
     workingDirFor w (RecipeNode _ _) = Just w
-yamlPathsFor LocalRun = (const Nothing, const Nothing)
+yamlPathsFor LiveRun = (const Nothing, const Nothing)
 yamlPathsFor DumpRun = (const Nothing, const Nothing)
 
 -- | A user-recoverable failure during graph construction. Surfaced
--- through @Either@ rather than 'die' so callers ('runLocal',
--- 'runStrict', 'runGraph', 'runDumpYaml', 'runProtect') own the
--- die-vs-respond boundary at one place. Other failures inside
+-- through @Either@ rather than 'die' so callers ('runPipeline',
+-- 'runGraph', 'runDumpYaml', 'runProtect') own the die-vs-respond
+-- boundary at one place. Other failures inside
 -- 'buildNodeGraph' (justfile parse, recipe ordering cycles, reachability
 -- on a missing recipe, local-system classification) already flow
 -- through their own 'Either' types and are funneled here via
@@ -542,9 +693,8 @@ buildNodeGraph hosts sel = do
 -- | Build the full 'ProcessCompose' YAML: extends 'buildNodeGraph'
 -- with SHA resolution, transport command rendering, and the
 -- per-mode YAML projections ('yamlPathsFor'). Used by every
--- subcommand that actually drives process-compose ('runLocal',
--- 'runStrict') or emits its YAML/graph form ('runDumpYaml',
--- 'runGraph').
+-- subcommand that actually drives process-compose ('runPipeline')
+-- or emits its YAML/graph form ('runDumpYaml', 'runGraph').
 --
 -- Each fanned-out 'NodeId' gets a local or @ssh host@ command
 -- depending on whether its platform matches the runner's; the
@@ -617,7 +767,7 @@ commandForNode sha localPlat hosts cacheTtlHours node = case (node, lookupHost p
 -- | The @NodeId -> host-label@ resolver the verdict summary prints.
 -- Pure: closes over an already-loaded 'Hosts' so the caller controls
 -- how many times the JSON is parsed (once, at the top of
--- 'runLocal' / 'runStrict' / 'runGraph'). Nodes whose platform has
+-- 'runPipeline' / 'runGraph'). Nodes whose platform has
 -- an entry render as that host; nodes without an entry render as
 -- @"local"@ (the orchestrator-local lane that ran inline).
 --

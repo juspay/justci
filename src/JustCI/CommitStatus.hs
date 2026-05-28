@@ -307,8 +307,9 @@ formatElapsed dt
 -- | Per-node start-time store. Populated by 'postStatusFor' when a
 -- node first transitions to @PsRunning@; read on the terminal
 -- transition to compute elapsed duration. One instance per pipeline
--- run, allocated by the caller via 'newTimings' (typically in
--- 'JustCI.Pipeline.runStrict' alongside the outcome accumulator).
+-- run, allocated by the caller via 'newTimings' inside
+-- 'JustCI.Pipeline.buildOnState' — alongside the outcome
+-- accumulator, on the policy arm that posts.
 --
 -- Single-threaded by construction — the WebSocket observer loop
 -- ('JustCI.ProcessCompose.Events.subscribeStates') invokes 'postStatusFor'
