@@ -472,11 +472,14 @@ instance Display BuildGraphError where
   displayBuilder (EmptyFanout rootName oss FilterExcludedAll filt) =
     "--platform "
       <> displayBuilder (T.intercalate ", " (display <$> filt))
-      <> " excluded every platform matching "
+      <> " excluded every platform for "
       <> displayBuilder rootName
-      <> "'s OS attrs ("
-      <> displayBuilder (T.pack (unwords (show <$> oss)))
-      <> "). Drop the override or pick one that matches."
+      <> case oss of
+        [] -> ". That recipe has no OS-family attributes — it runs on the local platform only."
+        _ ->
+          "'s OS attrs ("
+            <> displayBuilder (T.pack (unwords (show <$> oss)))
+            <> "). Drop the override or pick one that matches."
 
 -- | Walk @just --dump@ → root → reachable subgraph → topologically
 -- lowered DAG → fan out across the pipeline's platform set → filter
